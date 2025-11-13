@@ -1,0 +1,24 @@
+name: "Prow merge master to stable"
+
+on:
+  workflow_dispatch:
+        
+env:
+  UPSTREAM_URL: "https://github.com/opendatahub-io/MLServer.git"
+  
+jobs:
+  auto-merge:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+    
+      - name: Intenal gitHub sync
+        uses: dchourasia/sync-git-branches@main
+        with:
+          upstream_repo: "${{ env.UPSTREAM_URL }}"
+          upstream_branch: "master"
+          downstream_branch: "stable"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          merge_args: "--no-edit"
