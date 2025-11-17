@@ -1,4 +1,4 @@
-name: "Prow merge master to stable"
+name: "Prow merge release branch to rhoai-staging"
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ env:
   
 jobs:
   auto-merge:
-    if: github.ref == 'refs/heads/master'
+    if: startsWith(github.ref, 'refs/heads/release-')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -18,7 +18,7 @@ jobs:
         uses: dchourasia/sync-git-branches@main
         with:
           upstream_repo: "${{ env.UPSTREAM_URL }}"
-          upstream_branch: "master"
-          downstream_branch: "stable"
+          upstream_branch: ${{ github.ref_name }}
+          downstream_branch: "rhoai-staging"
           token: ${{ secrets.GITHUB_TOKEN }}
           merge_args: "--no-edit"
