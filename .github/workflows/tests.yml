@@ -5,8 +5,12 @@ on:
     branches:
       - master
       - release/*
+      - rhoai-staging
   pull_request:
-    branches: [master]
+    branches:
+      - master
+      - release/*
+      - rhoai-staging
 
 jobs:
   generate:
@@ -112,11 +116,6 @@ jobs:
           - sklearn
           - xgboost
           - lightgbm
-          - mlflow
-          - huggingface
-          - alibi-explain
-          - alibi-detect
-          - catboost
         is-pr:
           - ${{ github.event_name == 'pull_request' }}
         exclude:
