@@ -1,0 +1,24 @@
+name: "Prow merge release branch to rhoai-staging"
+
+on:
+  workflow_dispatch:
+        
+env:
+  UPSTREAM_URL: "https://github.com/opendatahub-io/MLServer.git"
+  
+jobs:
+  auto-merge:
+    if: startsWith(github.ref, 'refs/heads/release-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+    
+      - name: Internal GitHub sync
+        uses: dchourasia/sync-git-branches@main
+        with:
+          upstream_repo: "${{ env.UPSTREAM_URL }}"
+          upstream_branch: ${{ github.ref_name }}
+          downstream_branch: "rhoai-staging"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          merge_args: "--no-edit"
