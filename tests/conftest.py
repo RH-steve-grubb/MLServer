@@ -5,7 +5,6 @@ import asyncio
 import glob
 import json
 
-from filelock import FileLock
 from typing import Dict, Any, Tuple
 from starlette_exporter import PrometheusMiddleware
 from prometheus_client.registry import REGISTRY, CollectorRegistry
@@ -27,7 +26,7 @@ from mlserver import types, Settings, ModelSettings, MLServer
 
 from .metrics.utils import unregister_metrics
 from .fixtures import SumModel, TextModel, TextStreamModel, ErrorModel, SimpleModel
-from .utils import RESTClient, get_available_ports, _get_tarball_name
+from .utils import RESTClient, get_available_ports
 
 MIN_PYTHON_VERSION = (3, 9)
 MAX_PYTHON_VERSION = (3, 12)
