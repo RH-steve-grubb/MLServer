@@ -27,7 +27,7 @@ from mlserver import types, Settings, ModelSettings, MLServer
 
 from .metrics.utils import unregister_metrics
 from .fixtures import SumModel, TextModel, TextStreamModel, ErrorModel, SimpleModel
-from .utils import RESTClient, get_available_ports, _get_tarball_name
+from .utils import RESTClient, get_available_ports, _pack, _get_tarball_name
 
 MIN_PYTHON_VERSION = (3, 9)
 MAX_PYTHON_VERSION = (3, 12)
@@ -72,6 +72,24 @@ def testdata_cache_path() -> str:
 )
 def env_python_version(request: pytest.FixtureRequest) -> Tuple[int, int]:
     return request.param
+
+
+@pytest.fixture
+async def env_tarball(
+    env_python_version: Tuple[int, int],
+    testdata_cache_path: str,
+) -> str:
+    tarball_name = _get_tarball_name(env_python_version)
+    tarball_path = os.path.join(testdata_cache_path, tarball_name)
+
+    with FileLock(f"{tarball_path}.lock"):
+        if os.path.isfile(tarball_path):
+            return tarball_path
+
+        env_yml = os.path.join(TESTDATA_PATH, "environment.yml")
+        await _pack(env_python_version, env_yml, tarball_path)
+
+    return tarball_path
 
 
 @pytest.fixture
