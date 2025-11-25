@@ -46,7 +46,7 @@ def get_python_versions() -> list[tuple[int, int]]:
     use_conda = os.environ.get("USE_CONDA", "").lower() in ("1", "true", "yes")
     if use_conda:
         return PYTHON_VERSIONS
-    
+
     return [(sys.version_info.major, sys.version_info.minor)]
 
 
@@ -98,17 +98,17 @@ async def env_tarball(
         use_conda = os.environ.get("USE_CONDA", "").lower() in ("1", "true", "yes")
         if use_conda:
             await _pack(
-                use_conda, 
-                env_python_version, 
-                os.path.join(TESTDATA_PATH, "environment.yml"), 
-                tarball_path
+                use_conda,
+                env_python_version,
+                os.path.join(TESTDATA_PATH, "environment.yml"),
+                tarball_path,
             )
         else:
             await _pack(
-                use_conda, 
-                env_python_version, 
-                os.path.join(TESTDATA_PATH, "environment.txt"), 
-                tarball_path
+                use_conda,
+                env_python_version,
+                os.path.join(TESTDATA_PATH, "environment.txt"),
+                tarball_path,
             )
 
     return tarball_path
