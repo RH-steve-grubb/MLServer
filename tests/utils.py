@@ -92,7 +92,49 @@ def _inject_python_version(
     return new_env_yml
 
 
-async def _pack(version: Tuple[int, int], env_yml: str, tarball_path: str):
+async def _pack_with_venv(version: Tuple[int, int], req_txt: str, tarball_path: str):
+    """
+    Create a tarball of a Python environment using venv, pip, and tarfile.
+    """
+    import tempfile
+    import tarfile
+
+    uuid = generate_uuid()
+    env_name = f"mlserver-{uuid}"
+
+    # Create a temporary directory for the venv
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        venv_path = os.path.join(tmp_dir, env_name)
+
+        # Create venv with the requested Python version
+        major, minor = version
+        python_exe = f"python{major}.{minor}"
+
+        try:
+            # Check if the specific Python version is available
+            await _run(f"{python_exe} --version")
+        except Exception:
+            # Fall back to system python if specific version not available
+            logger.warning(f"Python {major}.{minor} not found, using system python")
+            python_exe = "python3"
+
+        # Create the virtual environment
+        await _run(f"{python_exe} -m venv --copies {venv_path}")
+
+        # Upgrade pip and install dependencies
+        pip_exe = os.path.join(venv_path, "bin", "pip")
+        await _run(f"{pip_exe} install --upgrade pip")
+        await _run(f"cd {os.path.dirname(req_txt)} && {pip_exe} install -r {req_txt}")
+
+        # Create tarball from the venv directory
+        with tarfile.open(tarball_path, "w:gz") as tar:
+            tar.add(venv_path, arcname=".")
+
+
+async def _pack_with_conda(version: Tuple[int, int], env_yml: str, tarball_path: str):
+    """
+    Create a tarball of a Python environment using conda and conda-pack.
+    """
     uuid = generate_uuid()
     fixed_env_yml = _inject_python_version(version, env_yml, tarball_path)
     env_name = f"mlserver-{uuid}"
@@ -109,6 +151,21 @@ async def _pack(version: Tuple[int, int], env_yml: str, tarball_path: str):
         )
     finally:
         await _run(f"conda env remove -n {env_name}")
+
+
+async def _pack(
+    use_conda: bool, version: Tuple[int, int], source_file: str, tarball_path: str
+):
+    """
+    Create an environment tarball.
+    Uses either conda-pack or venv based on USE_CONDA env variable.
+    """
+    if use_conda:
+        # Use conda-pack based implementation
+        await _pack_with_conda(version, source_file, tarball_path)
+    else:
+        # Use venv-based implementation
+        await _pack_with_venv(version, source_file, tarball_path)
 
 
 def _get_tarball_name(version: Tuple[int, int]) -> str:

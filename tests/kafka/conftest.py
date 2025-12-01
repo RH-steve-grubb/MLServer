@@ -32,7 +32,12 @@ def event_loop():
     # `module`, so that it can be used downstream on other `module`-scoped
     # fixtures
     install_uvloop_event_loop()
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No event loop running yet, create a new one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     yield loop
     loop.close()
 
@@ -75,7 +80,7 @@ def zookeeper(docker_client: DockerClient, kafka_network: str) -> str:
 
     container = docker_client.containers.run(
         name=zookeeper_name,
-        image="confluentinc/cp-zookeeper:latest",
+        image="confluentinc/cp-zookeeper:7.9.4",
         ports={
             f"{zookeeper_port}/tcp": str(zookeeper_port),
         },
@@ -102,7 +107,7 @@ async def kafka(docker_client: DockerClient, zookeeper: str, kafka_network: str)
 
     container = docker_client.containers.run(
         name=kafka_name,
-        image="confluentinc/cp-kafka:latest",
+        image="confluentinc/cp-kafka:7.9.4",
         ports={
             f"{kafka_port}/tcp": str(kafka_port),
         },

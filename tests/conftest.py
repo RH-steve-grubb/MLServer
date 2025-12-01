@@ -4,6 +4,7 @@ import shutil
 import asyncio
 import glob
 import json
+import sys
 
 from filelock import FileLock
 from typing import Dict, Any, Tuple
@@ -41,6 +42,14 @@ TESTDATA_PATH = os.path.join(TESTS_PATH, "testdata")
 TESTDATA_CACHE_PATH = os.path.join(TESTDATA_PATH, ".cache")
 
 
+def get_python_versions() -> list[tuple[int, int]]:
+    use_conda = os.environ.get("USE_CONDA", "").lower() in ("1", "true", "yes")
+    if use_conda:
+        return PYTHON_VERSIONS
+
+    return [(sys.version_info.major, sys.version_info.minor)]
+
+
 def assert_not_called_with(self, *args, **kwargs):
     """
     From https://stackoverflow.com/a/54838760/5015573
@@ -67,8 +76,8 @@ def testdata_cache_path() -> str:
 
 
 @pytest.fixture(
-    params=PYTHON_VERSIONS,
-    ids=[f"py{major}{minor}" for (major, minor) in PYTHON_VERSIONS],
+    params=get_python_versions(),
+    ids=[f"py{major}{minor}" for (major, minor) in get_python_versions()],
 )
 def env_python_version(request: pytest.FixtureRequest) -> Tuple[int, int]:
     return request.param
@@ -86,8 +95,21 @@ async def env_tarball(
         if os.path.isfile(tarball_path):
             return tarball_path
 
-        env_yml = os.path.join(TESTDATA_PATH, "environment.yml")
-        await _pack(env_python_version, env_yml, tarball_path)
+        use_conda = os.environ.get("USE_CONDA", "").lower() in ("1", "true", "yes")
+        if use_conda:
+            await _pack(
+                use_conda,
+                env_python_version,
+                os.path.join(TESTDATA_PATH, "environment.yml"),
+                tarball_path,
+            )
+        else:
+            await _pack(
+                use_conda,
+                env_python_version,
+                os.path.join(TESTDATA_PATH, "environment.txt"),
+                tarball_path,
+            )
 
     return tarball_path
 
@@ -135,7 +157,12 @@ def prometheus_registry(metrics_registry: MetricsRegistry) -> CollectorRegistry:
 def event_loop():
     # By default use uvloop for tests
     install_uvloop_event_loop()
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No event loop running yet, create a new one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
     yield loop
     loop.close()
 

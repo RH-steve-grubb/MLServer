@@ -5,8 +5,12 @@ on:
     branches:
       - master
       - release/*
+      - rhoai-staging
   pull_request:
-    branches: [master]
+    branches:
+      - master
+      - release/*
+      - rhoai-staging
 
 jobs:
   generate:
@@ -83,10 +87,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: conda-incubator/setup-miniconda@v3
-        with:
-          auto-update-conda: true
-          auto-activate-base: false
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
@@ -98,7 +98,7 @@ jobs:
           if [[ ${{ runner.os == 'macOS' }} ]]; then
             source ./hack/activate-libomp-macos.sh
           fi
-          poetry run tox -e mlserver
+          poetry run tox -e odh-mlserver
 
   test-runtimes:
     strategy:
@@ -112,11 +112,6 @@ jobs:
           - sklearn
           - xgboost
           - lightgbm
-          - mlflow
-          - huggingface
-          - alibi-explain
-          - alibi-detect
-          - catboost
         is-pr:
           - ${{ github.event_name == 'pull_request' }}
         exclude:
@@ -134,10 +129,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: conda-incubator/setup-miniconda@v3
-        with:
-          auto-update-conda: true
-          auto-activate-base: false
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
@@ -193,10 +184,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - uses: conda-incubator/setup-miniconda@v3
-        with:
-          auto-update-conda: true
-          auto-activate-base: false
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
@@ -208,4 +195,4 @@ jobs:
           if [[ ${{ runner.os == 'macOS' }} ]]; then
             source ./hack/activate-libomp-macos.sh
           fi
-          poetry run tox -e all-runtimes
+          poetry run tox -e odh-all-runtimes
