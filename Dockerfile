@@ -33,12 +33,10 @@ ARG PYTHON_VERSION=3.12
 # Set a few default environment variables, including `LD_LIBRARY_PATH`
 # (required to use GKE's injected CUDA libraries).
 # NOTE: When updating between major Python versions make sure you update the
-# `/opt/conda` path within `LD_LIBRARY_PATH`.
 ENV MLSERVER_MODELS_DIR=/mnt/models \
     MLSERVER_ENV_TARBALL=/mnt/models/environment.tar.gz \
     MLSERVER_PATH=/opt/mlserver \
-    CONDA_PATH=/opt/conda \
-    PATH=/opt/mlserver/.local/bin:/opt/conda/bin:$PATH \
+    PATH=/opt/mlserver/.local/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/lib/python3.12/site-packages/nvidia/nccl/lib/:$LD_LIBRARY_PATH \
     HF_HOME=/opt/mlserver/.cache \
     NUMBA_CACHE_DIR=/opt/mlserver/.cache
@@ -85,14 +83,8 @@ RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
 
 COPY ./licenses/license.txt .
 COPY ./licenses/license.txt /licenses/
-COPY \
-    ./hack/build-env.sh \
-    ./hack/generate_dotenv.py \
-    ./hack/activate-env.sh \
-    ./hack/
 
 USER 1000
 
 # MLServer starts
-CMD ["bash", "-c", "source ./hack/activate-env.sh $MLSERVER_ENV_TARBALL && mlserver start $MLSERVER_MODELS_DIR"]
-
+CMD ["/bin/sh", "-c", "mlserver start $MLSERVER_MODELS_DIR"]
