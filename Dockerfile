@@ -1,6 +1,8 @@
+ARG BUILDER_BASE_IMAGE="python:3.12-slim"
+ARG RUNTIME_BASE_IMAGE="registry.access.redhat.com/ubi9/ubi-minimal"
 ARG RUNTIMES="lightgbm sklearn xgboost"
 
-FROM python:3.12-slim AS wheel-builder
+FROM ${BUILDER_BASE_IMAGE} AS wheel-builder
 
 ARG RUNTIMES
 ARG POETRY_VERSION="2.1.1"
@@ -25,7 +27,7 @@ RUN pip install poetry==$POETRY_VERSION && \
         --format constraints.txt \
         -o /opt/mlserver/dist/constraints.txt
 
-FROM registry.access.redhat.com/ubi9/ubi-minimal
+FROM ${RUNTIME_BASE_IMAGE}
 
 ARG RUNTIMES
 ARG PYTHON_VERSION=3.12
@@ -37,7 +39,7 @@ ENV MLSERVER_MODELS_DIR=/mnt/models \
     MLSERVER_ENV_TARBALL=/mnt/models/environment.tar.gz \
     MLSERVER_PATH=/opt/mlserver \
     PATH=/opt/mlserver/.local/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/lib/python3.12/site-packages/nvidia/nccl/lib/:$LD_LIBRARY_PATH \
+    LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/:$LD_LIBRARY_PATH \
     HF_HOME=/opt/mlserver/.cache \
     NUMBA_CACHE_DIR=/opt/mlserver/.cache
 
@@ -68,10 +70,10 @@ RUN mkdir -p $MLSERVER_PATH && \
 
 COPY --from=wheel-builder /opt/mlserver/dist ./dist
 
-RUN ln -sf /usr/bin/python3.12 /usr/bin/python3 && \
-    ln -sf /usr/bin/python3.12 /usr/bin/python && \
-    ln -sf /usr/bin/pip3.12 /usr/bin/pip3 && \
-    ln -sf /usr/bin/pip3.12 /usr/bin/pip &&\
+RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
+    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip &&\
     pip install --upgrade pip wheel setuptools && \
     for _runtime in $RUNTIMES; do \
         _wheel="./dist/mlserver_$_runtime-"*.whl; \
