@@ -72,7 +72,7 @@ When `USE_CONDA=true` (or `1`, `yes`):
      - conda-forge
    dependencies:
      - python == 3.12
-     - scikit-learn == 1.3.1
+     - scikit-learn == 1.6.1
      - pip:
          - mlserver @ git+${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git@${GITHUB_REF}
    ```
@@ -109,7 +109,7 @@ When `USE_CONDA=false` (default for ODH):
 
 1. **Test fixture reads**: [tests/testdata/environment.txt](tests/testdata/environment.txt)
    ```
-   scikit-learn==1.3.1
+   scikit-learn==1.6.1
    ../../.
    ```
 

@@ -103,7 +103,7 @@ def check_sklearn_version(response):
     assert len(response.outputs) == 1
     assert response.outputs[0].name == "sklearn_version"
     [sklearn_version] = StringCodec.decode_output(response.outputs[0])
-    assert sklearn_version == "1.3.1"
+    assert sklearn_version == "1.6.1"
 
 
 async def test_load_model_with_env(
