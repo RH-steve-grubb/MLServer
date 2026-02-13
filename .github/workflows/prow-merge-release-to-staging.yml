@@ -4,8 +4,11 @@ on:
   workflow_dispatch:
         
 env:
-  UPSTREAM_URL: "https://github.com/opendatahub-io/MLServer.git"
   RELEASE_BRANCH: ${{ github.ref_name }}
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
   auto-merge:
