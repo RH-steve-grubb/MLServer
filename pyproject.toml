@@ -57,7 +57,8 @@ py-grpc-prometheus = "*"
 aiokafka = "*"
 # add a min version to tritonclient due to https://github.com/triton-inference-server/server/issues/6246
 tritonclient = {version = ">=2.42", extras = ["http"]}
-geventhttpclient = "*"
+# keep a min version for geventhttpclient to avoid compatibility regressions
+geventhttpclient = ">=2.1.1"
 gevent = "*"
 aiofiles = "*"
 orjson = "*"
@@ -120,6 +121,7 @@ optional = true
 mlserver-sklearn = {path = "./runtimes/sklearn", develop = true}
 mlserver-xgboost = {path = "./runtimes/xgboost", develop = true}
 mlserver-lightgbm = {path = "./runtimes/lightgbm", develop = true}
+mlserver-onnx = {path = "./runtimes/onnx", develop = true}
 
 [tool.poetry.group.all-runtimes-dev]
 optional = true

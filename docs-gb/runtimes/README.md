@@ -28,5 +28,6 @@ class in your `model-settings.json` file.
 | Spark MLlib  | `mlserver-mllib`        | `mlserver_mllib.MLlibModel`                | [MLlib example](../examples/mllib/README.md)            | [MLServer MLlib](./mllib.md) |
 | LightGBM     | `mlserver-lightgbm`     | `mlserver_lightgbm.LightGBMModel`          | [LightGBM example](../examples/lightgbm/README.md)         | [MLServer LightGBM](./lightgbm.md)   |
 | CatBoost     | `mlserver-catboost`     | `mlserver_catboost.CatboostModel`          | [CatBoost example](../examples/catboost/README.md)         | [MLServer CatBoost](./catboost.md)  |
+| ONNX         | `mlserver-onnx`         | `mlserver_onnx.OnnxModel`                  | [ONNX example](../examples/onnx/README.md)                 | [MLServer ONNX](./onnx.md)  |
 | MLflow       | `mlserver-mlflow`       | `mlserver_mlflow.MLflowRuntime`            | [MLflow example](../examples/mlflow/README.md)             | [MLServer MLflow](./mlflow.md) |
 | Alibi-Detect | `mlserver-alibi-detect` | `mlserver_alibi_detect.AlibiDetectRuntime` | [Alibi-detect example](../examples/alibi-detect/README.md) | [MLServer Alibi-Detect](./alibi-detect.md)  |

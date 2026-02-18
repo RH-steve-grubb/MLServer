@@ -30,7 +30,7 @@ spec:
     value: .
   - name: build-args
     value:
-    - RUNTIMES=lightgbm sklearn xgboost
+    - RUNTIMES=lightgbm onnx sklearn xgboost
   pipelineRef:
     resolver: git
     params:

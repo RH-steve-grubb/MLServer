@@ -1,6 +1,6 @@
 ARG BUILDER_BASE_IMAGE="python:3.12-slim"
 ARG RUNTIME_BASE_IMAGE="registry.access.redhat.com/ubi9/ubi-minimal"
-ARG RUNTIMES="lightgbm sklearn xgboost"
+ARG RUNTIMES="lightgbm onnx sklearn xgboost"
 
 FROM ${BUILDER_BASE_IMAGE} AS wheel-builder
 
@@ -34,7 +34,7 @@ ARG PYTHON_VERSION=3.12
 
 # Set a few default environment variables, including `LD_LIBRARY_PATH`
 # (required to use GKE's injected CUDA libraries).
-# NOTE: When updating between major Python versions make sure you update the
+# NOTE: When updating between major Python versions, update the PYTHON_VERSION ARG above.
 ENV MLSERVER_MODELS_DIR=/mnt/models \
     MLSERVER_ENV_TARBALL=/mnt/models/environment.tar.gz \
     MLSERVER_PATH=/opt/mlserver \

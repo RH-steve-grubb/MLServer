@@ -76,6 +76,7 @@ Out of the box, MLServer provides support for:
 | Spark MLlib   | ✅        | [MLServer MLlib](./runtimes/mllib)                               |
 | LightGBM      | ✅        | [MLServer LightGBM](./runtimes/lightgbm)                         |
 | CatBoost      | ✅        | [MLServer CatBoost](./runtimes/catboost)                         |
+| ONNX          | ✅        | [MLServer ONNX](./runtimes/onnx)                                 |
 | Tempo         | ✅        | [`github.com/SeldonIO/tempo`](https://github.com/SeldonIO/tempo) |
 | MLflow        | ✅        | [MLServer MLflow](./runtimes/mlflow)                             |
 | Alibi-Detect  | ✅        | [MLServer Alibi Detect](./runtimes/alibi-detect)                 |
@@ -115,6 +116,7 @@ MLServer to start serving your machine learning models.
 - [Serving a `xgboost` model](./docs/examples/xgboost/README.md)
 - [Serving a `lightgbm` model](./docs/examples/lightgbm/README.md)
 - [Serving a `catboost` model](./docs/examples/catboost/README.md)
+- [Serving an `onnx` model](./docs/examples/onnx/README.md)
 - [Serving a `tempo` pipeline](./docs/examples/tempo/README.md)
 - [Serving a custom model](./docs/examples/custom/README.md)
 - [Serving an `alibi-detect` model](./docs/examples/alibi-detect/README.md)

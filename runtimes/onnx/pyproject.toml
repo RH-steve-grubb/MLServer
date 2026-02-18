@@ -1,0 +1,29 @@
+[tool.poetry]
+name = "mlserver-onnx"
+version = "1.7.0.dev0"
+description = "ONNX runtime for MLServer"
+authors = [
+    "Syed Nomaan Ali (Snomaan6846) <nomaan.syed.ali@gmail.com>",
+    "Syed Nomaan Ali (Red Hat, Inc.) <syedali@redhat.com>",
+]
+license = "Apache-2.0"
+readme = "README.md"
+packages = [{include = "mlserver_onnx"}]
+
+[tool.poetry.dependencies]
+python = ">=3.9,<3.13"
+mlserver = "*"
+onnxruntime = [
+    {version = "<=1.19.2", markers = "python_version < '3.10'"},
+    {version = ">=1.20.0,<1.24", markers = "python_version >= '3.10' and python_version < '3.11'"},
+    {version = ">=1.20.0", markers = "python_version >= '3.11'"},
+]
+onnx = ">=1.16,<1.18"
+
+[tool.poetry.group.dev.dependencies]
+mlserver = {path = "../..", develop = true}
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+

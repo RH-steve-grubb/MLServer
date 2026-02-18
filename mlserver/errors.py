@@ -35,6 +35,20 @@ class ModelNotReady(MLServerError):
         super().__init__(msg, status.HTTP_400_BAD_REQUEST)
 
 
+class ModelLoadError(MLServerError):
+    """Raised when model loading or validation fails (e.g. invalid artifact)."""
+
+    def __init__(self, msg: str):
+        super().__init__(msg, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
+class ModelValidationError(MLServerError):
+    """Raised when model configuration or options are invalid (e.g. at load time)."""
+
+    def __init__(self, msg: str):
+        super().__init__(msg, status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+
 class InferenceError(MLServerError):
     def __init__(self, msg: str):
         super().__init__(msg, status.HTTP_400_BAD_REQUEST)

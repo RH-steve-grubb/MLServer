@@ -17,6 +17,7 @@ models](./custom/README.md)).
 - [Serving XGBoost models](./xgboost/README.md)
 - [Serving LightGBM models](./lightgbm/README.md)
 - [Serving CatBoost models](./catboost/README.md)
+- [Serving ONNX models](./onnx/README.md)
 - [Serving Tempo pipelines](./tempo/README.md)
 - [Serving MLflow models](./mlflow/README.md)
 - [Serving custom models](./custom/README.md)
@@ -31,6 +32,7 @@ models](./custom/README.md)).
 ./sklearn/README.md
 ./xgboost/README.md
 ./lightgbm/README.md
+./onnx/README.md
 ./tempo/README.md
 ./mlflow/README.md
 ./custom/README.md

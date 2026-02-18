@@ -31,7 +31,7 @@ spec:
     value: .
   - name: build-args
     value:
-    - RUNTIMES=lightgbm sklearn xgboost
+    - RUNTIMES=lightgbm onnx sklearn xgboost
   - name: additional-tags
     value:
     - 'odh-pr-{{revision}}'

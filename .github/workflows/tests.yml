@@ -118,6 +118,7 @@ jobs:
           - sklearn
           - xgboost
           - lightgbm
+          - onnx
         is-pr:
           - ${{ github.event_name == 'pull_request' }}
         exclude:
