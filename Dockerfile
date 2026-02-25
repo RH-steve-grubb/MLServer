@@ -1,4 +1,4 @@
-ARG BUILDER_BASE_IMAGE="python:3.12-slim"
+ARG BUILDER_BASE_IMAGE="registry.access.redhat.com/ubi9/ubi-minimal"
 ARG RUNTIME_BASE_IMAGE="registry.access.redhat.com/ubi9/ubi-minimal"
 ARG RUNTIMES="lightgbm onnx sklearn xgboost"
 
@@ -6,6 +6,7 @@ FROM ${BUILDER_BASE_IMAGE} AS wheel-builder
 
 ARG RUNTIMES
 ARG POETRY_VERSION="2.1.1"
+ARG PYTHON_VERSION=3.12
 
 WORKDIR /opt/mlserver
 
@@ -17,6 +18,17 @@ COPY \
     poetry.lock \
     README.md \
     ./
+
+RUN microdnf update -y && \
+    microdnf install -y \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-pip && \
+    microdnf clean all && \
+    alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip && \
+    pip install --upgrade pip wheel setuptools
 
 # Install Poetry, build wheels and export constraints.txt file
 RUN pip install poetry==$POETRY_VERSION && \
