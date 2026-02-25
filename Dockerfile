@@ -46,16 +46,10 @@ ENV MLSERVER_MODELS_DIR=/mnt/models \
 # Install some base dependencies required for some libraries
 RUN microdnf update -y && \
     microdnf install -y \
-        tar \
-        gzip \
-        libgomp \
-        mesa-libGL \
-        glib2-devel \
         shadow-utils \
         python${PYTHON_VERSION} \
         python${PYTHON_VERSION}-devel \
-        python${PYTHON_VERSION}-pip \
-        gcc && \
+        python${PYTHON_VERSION}-pip && \
     microdnf clean all
 
 WORKDIR /opt/mlserver
