@@ -48,7 +48,6 @@ RUN microdnf update -y && \
     microdnf install -y \
         shadow-utils \
         python${PYTHON_VERSION} \
-        python${PYTHON_VERSION}-devel \
         python${PYTHON_VERSION}-pip && \
     microdnf clean all
 
