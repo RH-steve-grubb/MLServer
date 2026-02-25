@@ -59,10 +59,9 @@ RUN mkdir -p $MLSERVER_PATH && \
     chown -R 1000:0 $MLSERVER_PATH && \
     chmod 1776 $MLSERVER_PATH
 
-COPY --from=wheel-builder /opt/mlserver/dist ./dist
-
 # Configure the new python as default
-RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+RUN --mount=type=bind,from=wheel-builder,src=/opt/mlserver/dist,target=./dist \ 
+    alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
     alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
     ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
     ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip &&\
