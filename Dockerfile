@@ -59,7 +59,7 @@ WORKDIR /opt/mlserver
 RUN mkdir -p $MLSERVER_PATH && \
     useradd -u 1000 -s /bin/bash mlserver -d $MLSERVER_PATH && \
     chown -R 1000:0 $MLSERVER_PATH && \
-    chmod -R 776 $MLSERVER_PATH
+    chmod 1776 $MLSERVER_PATH
 
 COPY --from=wheel-builder /opt/mlserver/dist ./dist
 
