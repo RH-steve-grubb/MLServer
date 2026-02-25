@@ -64,8 +64,9 @@ RUN mkdir -p $MLSERVER_PATH && \
 
 COPY --from=wheel-builder /opt/mlserver/dist ./dist
 
-RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
-    ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python && \
+# Configure the new python as default
+RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
     ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
     ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip &&\
     pip install --upgrade pip wheel setuptools && \
