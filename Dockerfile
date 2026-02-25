@@ -38,8 +38,6 @@ ARG PYTHON_VERSION=3.12
 ENV MLSERVER_MODELS_DIR=/mnt/models \
     MLSERVER_ENV_TARBALL=/mnt/models/environment.tar.gz \
     MLSERVER_PATH=/opt/mlserver \
-    PATH=/opt/mlserver/.local/bin:$PATH \
-    LD_LIBRARY_PATH=/usr/local/nvidia/lib64:/usr/local/lib/python${PYTHON_VERSION}/site-packages/nvidia/nccl/lib/:$LD_LIBRARY_PATH \
     HF_HOME=/opt/mlserver/.cache \
     NUMBA_CACHE_DIR=/opt/mlserver/.cache
 
