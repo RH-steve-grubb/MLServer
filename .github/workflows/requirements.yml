@@ -1,0 +1,113 @@
+# Generate requirements/*.txt from config variants and create a PR when files change.
+name: Requirements Regeneration
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Base branch to run against (manual runs only)'
+        required: true
+  schedule:
+    - cron: '0 */12 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate-and-pr:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && github.repository == 'opendatahub-io/MLServer') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      BASE_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || 'rhoai-staging' }}
+    steps:
+      - name: Validate base branch exists
+        run: |
+          set -euo pipefail
+          repo_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          if ! git ls-remote --heads "$repo_url" "$BASE_BRANCH" | grep -q .; then
+            echo "Base branch '$BASE_BRANCH' not found in ${GITHUB_REPOSITORY}."
+            echo "Use an existing branch name for workflow_dispatch input 'branch'."
+            exit 1
+          fi
+
+      # Pinned from actions/checkout v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ env.BASE_BRANCH }}
+          persist-credentials: false
+
+      - name: Set up Python
+        # Pinned from actions/setup-python v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.12'
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman yq jq
+
+      - name: Log in to container registry
+        # Pinned from docker/login-action v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: quay.io
+          username: ${{ secrets.AIPCC_QUAY_USERNAME }}
+          password: ${{ secrets.AIPCC_QUAY_PASSWORD }}
+
+      - name: Generate pinned requirements
+        env:
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          script=hack/generate-pinned-requirements.py
+          config=hack/requirements-config.json
+          jq -r '.variants[] | "\(.name)\t\(.dockerfile)"' "$config" | while IFS=$'\t' read -r name dockerfile; do
+            image="$(python "$script" --print-base-image "$dockerfile")"
+            echo "Running for variant $name in image $image ..."
+            podman run --rm --user 0 \
+              -e PYTHONDONTWRITEBYTECODE=1 \
+              -v "$WORKSPACE:$WORKSPACE:z" -w "$WORKSPACE" \
+              "$image" python "$script" -o "requirements/requirements-${name}.txt"
+          done
+
+      - name: Fix ownership of generated files
+        run: |
+          sudo chown -R "$USER:$USER" requirements/
+
+      - name: Load reviewers from OWNERS file
+        id: owners_reviewers
+        run: |
+          set -euo pipefail
+          if [[ ! -f OWNERS ]]; then
+            echo "reviewers=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          reviewers="$(yq -r '.reviewers // [] | join(",")' OWNERS)"
+          echo "reviewers=${reviewers}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or Update Pull Request
+        id: cpr
+        # Pinned from peter-evans/create-pull-request v8
+        uses: peter-evans/create-pull-request@c0f553fe549906ede9cf27b5156039d195d2ece0
+        with:
+          token: ${{ github.token }}
+          base: ${{ env.BASE_BRANCH }}
+          branch: requirements/regenerate-${{ env.BASE_BRANCH }}
+          delete-branch: true
+          commit-message: "chore: regenerate pinned requirements from hack/requirements-config.json"
+          title: Regenerate pinned requirements
+          body: |
+            ## Description
+            Regenerated `requirements/*.txt` by running the generator inside each base image container (per variant; pip uses each image index).
+
+            ## Changes
+            - Updated pinned requirements under `requirements/`
+
+            Triggered by **Actions → Requirements Regeneration** (manual or every 12 hours).
+          add-paths: |
+            requirements/
+          reviewers: ${{ github.repository == 'opendatahub-io/MLServer' && steps.owners_reviewers.outputs.reviewers || '' }}
+

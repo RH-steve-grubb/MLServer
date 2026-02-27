@@ -1,0 +1,14 @@
+{
+  "root_packages": [
+    "mlserver",
+    "mlserver-lightgbm",
+    "mlserver-sklearn",
+    "mlserver-xgboost"
+  ],
+  "variants": [
+    {
+      "name": "cpu",
+      "dockerfile": "Dockerfile.konflux"
+    }
+  ]
+}
