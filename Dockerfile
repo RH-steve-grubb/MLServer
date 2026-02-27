@@ -72,7 +72,7 @@ RUN mkdir -p $MLSERVER_PATH && \
     chmod 1776 $MLSERVER_PATH
 
 # Configure the new python as default
-RUN --mount=type=bind,from=wheel-builder,src=/opt/mlserver/dist,target=./dist \ 
+RUN --mount=type=bind,from=wheel-builder,src=/opt/mlserver/dist,target=./dist \
     alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
     alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
     ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
