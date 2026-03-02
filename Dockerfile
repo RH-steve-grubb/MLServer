@@ -53,9 +53,11 @@ ENV MLSERVER_MODELS_DIR=/mnt/models \
     HF_HOME=/opt/mlserver/.cache \
     NUMBA_CACHE_DIR=/opt/mlserver/.cache
 
-# Install some base dependencies required for some libraries
+# Install some base dependencies required for some libraries.
+# Libomp is needed by the LightGBM runtime.
 RUN microdnf update -y && \
     microdnf install -y \
+        libgomp \
         shadow-utils \
         python${PYTHON_VERSION} \
         python${PYTHON_VERSION}-pip && \
