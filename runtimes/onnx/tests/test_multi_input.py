@@ -7,6 +7,8 @@ from onnx import TensorProto, helper
 
 from mlserver_onnx import OnnxModel
 from mlserver.errors import InferenceError
+
+from .conftest import TEST_MODEL_IR_VERSION, TEST_MODEL_OPSET_VERSION
 from mlserver.settings import ModelSettings, ModelParameters
 from mlserver.types import InferenceRequest, RequestInput, Datatype
 
@@ -41,8 +43,8 @@ def multi_input_model_uri(tmp_path) -> str:
     model = helper.make_model(
         graph,
         producer_name="mlserver-onnx-test",
-        opset_imports=[helper.make_opsetid("", 11)],
-        ir_version=9,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
 
     model_uri = os.path.join(tmp_path, "multi-input-model.onnx")
@@ -238,8 +240,8 @@ def three_input_model_uri(tmp_path) -> str:
     model = helper.make_model(
         graph,
         producer_name="mlserver-onnx-test",
-        opset_imports=[helper.make_opsetid("", 11)],
-        ir_version=9,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
 
     model_uri = os.path.join(tmp_path, "three-input-model.onnx")
@@ -311,8 +313,8 @@ async def test_multi_input_different_shapes(tmp_path):
     model = helper.make_model(
         graph,
         producer_name="mlserver-onnx-test",
-        opset_imports=[helper.make_opsetid("", 11)],
-        ir_version=9,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
 
     model_uri = os.path.join(tmp_path, "different-shapes.onnx")

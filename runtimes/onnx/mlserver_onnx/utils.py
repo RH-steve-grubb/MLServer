@@ -1,8 +1,7 @@
 from typing import Any, Dict, List, Optional, Sequence
 
-import numpy as np
 import onnx
-from onnx import mapping
+from onnx import helper
 import onnxruntime as ort
 
 from mlserver.codecs.numpy import to_datatype
@@ -213,11 +212,13 @@ def _onnx_elem_type_to_datatype(elem_type: int) -> Datatype:
     Raises:
         ModelValidationError: If the element type is unsupported.
     """
-    np_type = mapping.TENSOR_TYPE_TO_NP_TYPE.get(elem_type)
-    if np_type is None:
-        raise ModelValidationError(f"Unsupported ONNX tensor element type: {elem_type}")
-
-    return to_datatype(np.dtype(np_type))
+    try:
+        np_dtype = helper.tensor_dtype_to_np_dtype(elem_type)
+        return to_datatype(np_dtype)
+    except (KeyError, TypeError, ValueError):
+        raise ModelValidationError(
+            f"Unsupported ONNX tensor element type: {elem_type}"
+        ) from None
 
 
 def _onnx_shape_to_list(value_info: onnx.ValueInfoProto) -> List[int]:

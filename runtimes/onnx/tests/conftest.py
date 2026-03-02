@@ -124,6 +124,14 @@ def prometheus_registry():
     PrometheusMiddleware._metrics.clear()
 
 
+# Test models use this IR and opset; pyproject.toml onnx/onnxruntime bounds
+# must support them.
+# Opset 11 / IR 9 are supported by onnx >=1.14 and all onnxruntime versions
+# we constrain.
+TEST_MODEL_IR_VERSION = 9
+TEST_MODEL_OPSET_VERSION = 11
+
+
 def _create_simple_onnx_model():
     """Create a simple ONNX model that adds 1 to input."""
     input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [None, 4])
@@ -156,14 +164,11 @@ def _create_simple_onnx_model():
         [output_tensor],
     )
 
-    # Use IR version 9 and opset 11 for maximum compatibility
-    # ONNX Runtime 1.23.x supports IR versions up to v11
-    # This works with ONNX packages from 1.16 to 1.19
     model = helper.make_model(
         graph,
         producer_name="mlserver-onnx-test",
-        opset_imports=[helper.make_opsetid("", 11)],
-        ir_version=9,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
 
     return model
@@ -258,12 +263,11 @@ def multi_output_model_uri(tmp_path) -> str:
         [output1_tensor, output2_tensor],
     )
 
-    # Use IR version 9 and opset 11 for maximum compatibility
     model = helper.make_model(
         graph,
         producer_name="mlserver-onnx-test",
-        opset_imports=[helper.make_opsetid("", 11)],
-        ir_version=9,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
 
     model_uri = os.path.join(tmp_path, "multi-output-model.onnx")

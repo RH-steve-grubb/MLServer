@@ -6,6 +6,8 @@ from mlserver.errors import ModelValidationError
 from mlserver.settings import ModelParameters, ModelSettings
 from mlserver.types import Datatype
 from mlserver_onnx.settings import OnnxSettings, get_onnx_settings
+
+from .conftest import TEST_MODEL_IR_VERSION, TEST_MODEL_OPSET_VERSION
 from mlserver_onnx.utils import (
     DEFAULT_EXECUTION_PROVIDERS,
     _extract_metadata,
@@ -129,7 +131,9 @@ def test_extract_metadata_ignores_initializers(tmp_path):
         [node], "init_model", [input_tensor], [output_tensor], [initializer]
     )
     model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=9
+        graph,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
     model_uri = tmp_path / "init-model.onnx"
     onnx.save(model, str(model_uri))

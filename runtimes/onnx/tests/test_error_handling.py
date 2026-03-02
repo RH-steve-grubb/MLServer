@@ -7,6 +7,8 @@ from onnx import TensorProto, helper
 
 from mlserver_onnx import OnnxModel
 from mlserver.errors import InvalidModelURI, ModelLoadError
+
+from .conftest import TEST_MODEL_IR_VERSION, TEST_MODEL_OPSET_VERSION
 from mlserver.settings import ModelSettings
 from mlserver.types import RequestInput
 
@@ -30,7 +32,9 @@ async def test_model_no_inputs_error(tmp_path, model_settings: ModelSettings):
     output_tensor = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, 4])
     graph = helper.make_graph([], "no_inputs", [], [output_tensor])
     model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=9
+        graph,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
     model_uri = os.path.join(tmp_path, "no-inputs.onnx")
     onnx.save(model, model_uri)
@@ -51,7 +55,9 @@ async def test_model_no_outputs_error(tmp_path, model_settings: ModelSettings):
     input_tensor = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 4])
     graph = helper.make_graph([], "no_outputs", [input_tensor], [])
     model = helper.make_model(
-        graph, opset_imports=[helper.make_opsetid("", 11)], ir_version=9
+        graph,
+        opset_imports=[helper.make_opsetid("", TEST_MODEL_OPSET_VERSION)],
+        ir_version=TEST_MODEL_IR_VERSION,
     )
     model_uri = os.path.join(tmp_path, "no-outputs.onnx")
     onnx.save(model, model_uri)

@@ -3315,10 +3315,13 @@ develop = true
 
 [package.dependencies]
 mlserver = "*"
-onnx = ">=1.16,<1.18"
+onnx = [
+    {version = ">=1.16.0,<1.20.0", markers = "python_version < \"3.10\""},
+    {version = ">=1.16.0", markers = "python_version >= \"3.10\""},
+]
 onnxruntime = [
     {version = "<=1.19.2", markers = "python_version < \"3.10\""},
-    {version = ">=1.20.0,<1.24", markers = "python_version == \"3.10\""},
+    {version = ">=1.20.0,<1.24.0", markers = "python_version == \"3.10\""},
     {version = ">=1.20.0", markers = "python_version >= \"3.11\""},
 ]
 
