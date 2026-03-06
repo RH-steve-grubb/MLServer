@@ -1,0 +1,138 @@
+ARG BUILDER_BASE_IMAGE="registry.access.redhat.com/ubi9/ubi-minimal"
+ARG RUNTIME_BASE_IMAGE="registry.access.redhat.com/ubi9/ubi-minimal"
+ARG RUNTIMES="lightgbm onnx sklearn xgboost"
+
+FROM ${BUILDER_BASE_IMAGE} AS wheel-builder
+
+ARG RUNTIMES
+ARG POETRY_VERSION="2.1.1"
+ARG PYTHON_VERSION=3.12
+
+WORKDIR /opt/mlserver
+
+COPY ./hack/build-wheels.sh ./hack/build-wheels.sh
+COPY ./mlserver ./mlserver
+COPY ./runtimes ./runtimes
+COPY \
+    pyproject.toml \
+    poetry.lock \
+    README.md \
+    ./
+
+RUN microdnf update -y && \
+    microdnf install -y \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-pip && \
+    microdnf clean all && \
+    alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip && \
+    pip install --upgrade pip wheel setuptools build
+
+RUN microdnf install -y \
+      gcc gcc-c++ gcc-gfortran \
+      make ninja-build cmake git patch diffutils pkgconfig \
+      python${PYTHON_VERSION}-devel openblas-openmp libgomp \
+      which tar gzip bzip2 xz unzip && \
+      curl https://mirrors.kernel.org/fedora/releases/43/Everything/x86_64/os/Packages/o/openblas-devel-0.3.29-2.fc43.x86_64.rpm -fSsL -o openblas-devel.rpm && \
+    rpm -ivh --nodeps openblas-devel.rpm && rm -f openblas-devel.rpm && \
+    microdnf clean all
+
+# Install Poetry, build wheels and export constraints.txt file
+RUN pip install poetry==$POETRY_VERSION && \
+    pip install poetry-plugin-export && \
+    ./hack/build-wheels.sh /opt/mlserver/dist "$RUNTIMES" && \
+    poetry export --with all-runtimes \
+        --without-hashes \
+        --format constraints.txt \
+        -o /opt/mlserver/dist/constraints.txt
+
+# Build the optimized wheels
+ENV CFLAGS="-O3 -march=haswell -flto=auto"
+ENV CXXFLAGS="-O3 -march=haswell -flto=auto"
+ENV FFLAGS="-O3 -march=haswell -flto=auto"
+ENV FCFLAGS="-O3 -march=haswell -flto=auto"
+ENV LDFLAGS="-flto=auto"
+ENV CC=gcc
+ENV CXX=g++
+ENV FC=gfortran
+ENV NPY_BLAS_ORDER=openblas
+ENV NPY_LAPACK_ORDER=openblas
+
+RUN mkdir -p /opt/mlserver/dist/custom && \
+  awk '/^numpy==/ || /^lightgbm==/ || /^onnx==/ || /^xgboost==/ { print $1 }' \
+    /opt/mlserver/dist/constraints.txt > /tmp/rebuild.txt && \
+    pip wheel \
+      --wheel-dir /opt/mlserver/dist/custom \
+      --no-binary=numpy,lightgbm,onnx,xgboost \
+      --no-deps \
+      -r /tmp/rebuild.txt
+
+#FROM ${RUNTIME_BASE_IMAGE}
+
+ARG RUNTIMES
+ARG PYTHON_VERSION=3.12
+
+# Set a few default environment variables, including `LD_LIBRARY_PATH`
+# (required to use GKE's injected CUDA libraries).
+# NOTE: When updating between major Python versions, update the PYTHON_VERSION ARG above.
+ENV MLSERVER_MODELS_DIR=/mnt/models \
+    MLSERVER_ENV_TARBALL=/mnt/models/environment.tar.gz \
+    MLSERVER_PATH=/opt/mlserver \
+    HF_HOME=/opt/mlserver/.cache \
+    NUMBA_CACHE_DIR=/opt/mlserver/.cache
+
+# Install some base dependencies required for some libraries.
+# Libomp is needed by the LightGBM runtime.
+RUN microdnf update -y && \
+    microdnf install -y \
+        libgomp \
+        openblas-openmp \
+        shadow-utils \
+        python${PYTHON_VERSION} \
+        python${PYTHON_VERSION}-pip && \
+    microdnf clean all
+
+WORKDIR /opt/mlserver
+
+# Create user and fix permissions
+# NOTE: We need to make /opt/mlserver world-writable so that the image is
+# compatible with random UIDs.
+RUN mkdir -p $MLSERVER_PATH && \
+    useradd -u 1000 -s /bin/bash mlserver -d $MLSERVER_PATH && \
+    chown -R 1000:0 $MLSERVER_PATH && \
+    chmod 1776 $MLSERVER_PATH
+
+# Configure the new python as default
+RUN alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    alternatives --set python3 /usr/bin/python${PYTHON_VERSION} && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip3 && \
+    ln -sf /usr/bin/pip${PYTHON_VERSION} /usr/bin/pip &&\
+    pip install --upgrade pip wheel setuptools && \
+    for _runtime in $RUNTIMES; do \
+        _wheel="./dist/mlserver_$_runtime-"*.whl; \
+        echo "--> Installing $_wheel..."; \
+        pip install $_wheel --constraint ./dist/constraints.txt; \
+    done && \
+    pip install \
+      --no-index \
+      --find-links=./dist/custom \
+      --force-reinstall \
+      --no-deps \
+      ./dist/custom/*.whl && \
+    rm -rf /root/.cache/pip
+
+COPY ./licenses/license.txt .
+COPY ./licenses/license.txt /licenses/
+COPY ./benchmarking ./benchmarking
+COPY ./proto ./proto
+RUN curl https://dl.k6.io/rpm/repo.rpm -fSsL -o repo.rpm && \
+	rpm -ivh ./repo.rpm && \
+	microdnf -y install k6 vim-minimal make && \
+	microdnf clean all && rm -f repo.rpm
+
+USER 1000
+
+# MLServer starts
+CMD ["/bin/sh", "-c", "mlserver start $MLSERVER_MODELS_DIR"]
