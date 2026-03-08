@@ -49,25 +49,48 @@ RUN pip install poetry==$POETRY_VERSION && \
         -o /opt/mlserver/dist/constraints.txt
 
 # Build the optimized wheels
-ENV CFLAGS="-O3 -march=haswell -flto=auto"
-ENV CXXFLAGS="-O3 -march=haswell -flto=auto"
-ENV FFLAGS="-O3 -march=haswell -flto=auto"
-ENV FCFLAGS="-O3 -march=haswell -flto=auto"
-ENV LDFLAGS="-flto=auto"
+ENV CFLAGS="-O3 -march=haswell -flto=auto -ffat-lto-objects"
+ENV CXXFLAGS="-O3 -march=haswell -flto=auto -ffat-lto-objects"
+ENV FFLAGS="-O3 -march=haswell -flto=auto -ffat-lto-objects"
+ENV FCFLAGS="-O3 -march=haswell -flto=auto -ffat-lto-objects"
+ENV LDFLAGS="-flto=auto -ffat-lto-objects -Wl,-plugin-opt=-march=haswell"
 ENV CC=gcc
 ENV CXX=g++
 ENV FC=gfortran
-ENV NPY_BLAS_ORDER=openblas
-ENV NPY_LAPACK_ORDER=openblas
+ENV PKG_CONFIG_PATH=/usr/lib64/pkgconfig:
 
-RUN mkdir -p /opt/mlserver/dist/custom && \
-  awk '/^numpy==/ || /^lightgbm==/ || /^onnx==/ || /^xgboost==/ { print $1 }' \
-    /opt/mlserver/dist/constraints.txt > /tmp/rebuild.txt && \
-    pip wheel \
+COPY openblas.pc /usr/lib64/pkgconfig/openblas.pc
+
+RUN mkdir -p /opt/mlserver/dist/custom /tmp/numpy-build && \
+    ls -l /usr/lib64/pkgconfig/openblas.pc && \
+    pkg-config --libs openblas && pkg-config --cflags openblas && \
+    pip -vvv wheel \
       --wheel-dir /opt/mlserver/dist/custom \
-      --no-binary=numpy,lightgbm,onnx,xgboost \
       --no-deps \
-      -r /tmp/rebuild.txt
+      --no-binary=numpy \
+      -Cbuild-dir=/tmp/numpy-build \
+      -Csetup-args=-Dblas=openblas \
+      -Csetup-args=-Dlapack=openblas \
+      -Csetup-args=-Dallow-noblas=false \
+      -Ccompile-args=-v \
+      "$(grep '^numpy==' /opt/mlserver/dist/constraints.txt)" && \
+    pip -vvv wheel \
+      --wheel-dir /opt/mlserver/dist/custom \
+      --no-deps \
+      --no-binary=lightgbm \
+      --config-settings=cmake.define.USE_OPENMP=ON \
+      "$(grep '^lightgbm==' /opt/mlserver/dist/constraints.txt)" && \
+    pip -vvv wheel \
+      --wheel-dir /opt/mlserver/dist/custom \
+      --no-deps \
+      --no-binary=xgboost \
+      --config-settings=use_openmp=True \
+      "$(grep '^xgboost==' /opt/mlserver/dist/constraints.txt)" && \
+    pip -vvv wheel \
+      --wheel-dir /opt/mlserver/dist/custom \
+      --no-deps \
+      --no-binary=onnx \
+      "$(grep '^onnx==' /opt/mlserver/dist/constraints.txt)"
 
 #FROM ${RUNTIME_BASE_IMAGE}
 

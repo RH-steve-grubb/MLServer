@@ -1,0 +1,13 @@
+prefix=/usr
+libdir=${prefix}/lib64
+includedir=${prefix}/include/openblas
+openblas_config= OpenBLAS 0.3.29 DYNAMIC_ARCH NO_AFFINITY Haswell MAX_THREADS=64
+version=0.3.29
+extralib=-lm -lpthread -lgfortran -lquadmath -L${libdir} -lopenblas
+
+Name: openblas
+Description: OpenBLAS is an optimized BLAS library
+Version: ${version}
+Libs: -L${libdir} -lopenblaso
+Libs.private: ${extralib}
+Cflags: -I${includedir}
