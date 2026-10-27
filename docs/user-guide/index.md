@@ -9,6 +9,7 @@ how to use them.
 ./content-type
 ./openapi
 ./parallel-inference
+./performance
 ./adaptive-batching
 ./custom
 ./metrics
