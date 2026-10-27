@@ -16,6 +16,7 @@ from mlserver.types import (
 )
 from mlserver.settings import ModelSettings
 from mlserver.utils import get_model_uri
+from .cuda import CudaGraphSession
 from .settings import OnnxSettings, get_onnx_settings
 from .utils import (
     PREDICT_OUTPUT,
@@ -93,7 +94,44 @@ class OnnxModel(MLModel):
         session_options = _apply_session_config_entries(
             session_options, self._onnx_settings
         )
-        self._run_options = _build_run_options(self._onnx_settings)
+        cuda_device_id = 0
+        if self._onnx_settings.cuda_graph:
+            if providers[0] != "CUDAExecutionProvider":
+                raise ModelLoadError("cuda_graph requires CUDAExecutionProvider first")
+            if self._onnx_settings.run_options:
+                raise ModelLoadError(
+                    "cuda_graph does not support configured RunOptions"
+                )
+            # Provider dictionaries may belong to model settings. Copy before
+            # enabling replay so loading does not rewrite the user's settings.
+            provider_options = [
+                dict(options)
+                for options in (
+                    provider_options
+                    if provider_options is not None
+                    else [{} for _ in providers]
+                )
+            ]
+            cuda_options = provider_options[0]
+            if str(cuda_options.get("enable_cuda_graph", "1")) != "1":
+                raise ModelLoadError("cuda_graph requires provider enable_cuda_graph=1")
+            cuda_options["enable_cuda_graph"] = "1"
+            device = cuda_options.get("device_id", 0)
+            if type(device) is not int and not isinstance(device, str):
+                raise ModelLoadError("CUDA device_id must be a non-negative integer")
+            try:
+                cuda_device_id = int(device)
+            except ValueError as exc:
+                raise ModelLoadError(
+                    "CUDA device_id must be a non-negative integer"
+                ) from exc
+            if cuda_device_id < 0:
+                raise ModelLoadError("CUDA device_id must be a non-negative integer")
+            # An empty RunOptions mapping requests defaults. The graph session
+            # uses its fixed binding path and accepts only the default None.
+            self._run_options = None
+        else:
+            self._run_options = _build_run_options(self._onnx_settings)
         logger.debug(
             "ONNX runtime options for model '%s': providers=%s, provider_options=%s, "
             "session_options=%s, run_options=%s",
@@ -107,11 +145,16 @@ class OnnxModel(MLModel):
         try:
             model = onnx.load(model_uri, load_external_data=True)
             model_bytes = model.SerializeToString()
-            self._model = ort.InferenceSession(
+            session = ort.InferenceSession(
                 model_bytes,
                 sess_options=session_options,
                 providers=providers,
                 provider_options=provider_options,
+            )
+            self._model = (
+                CudaGraphSession(session, cuda_device_id)
+                if self._onnx_settings.cuda_graph
+                else session
             )
         except Exception as exc:
             raise ModelLoadError(
@@ -279,8 +322,8 @@ class OnnxModel(MLModel):
 
     async def unload(self) -> bool:
         """Release the loaded model and clear runtime state."""
-        if getattr(self, "_model", None):
-            del self._model
+        # The graph session is the sole owner of its binding and device buffers;
+        # dropping it releases them together with the underlying ORT session.
         self._model = None
         self._onnx_settings = None
         self._input_names = []

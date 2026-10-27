@@ -33,6 +33,9 @@ class OnnxSettings(BaseSettings):
     run_options: dict[str, Any] | None = None
     """ONNX Runtime RunOptions attributes applied per inference."""
 
+    cuda_graph: bool = False
+    """Replay CUDA Graphs using fixed FP32 tensors and persistent device buffers."""
+
 
 def _get_env_settings() -> dict[str, Any]:
     """Read ONNX settings from the environment (MLSERVER_MODEL_ONNX_*)."""
