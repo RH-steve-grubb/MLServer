@@ -26,11 +26,15 @@ from collections.abc import AsyncIterator
 
 class InferenceServicer(GRPCInferenceServiceServicer):
     def __init__(
-        self, data_plane: DataPlane, model_repository_handlers: ModelRepositoryHandlers
+        self,
+        data_plane: DataPlane,
+        model_repository_handlers: ModelRepositoryHandlers,
+        raw_input_buffers: bool = False,
     ):
         super().__init__()
         self._data_plane = data_plane
         self._model_repository_handlers = model_repository_handlers
+        self._raw_input_buffers = raw_input_buffers
 
     async def ServerLive(
         self, request: pb.ServerLiveRequest, context
@@ -80,7 +84,9 @@ class InferenceServicer(GRPCInferenceServiceServicer):
         self, request: pb.ModelInferRequest, context: grpc.ServicerContext
     ) -> pb.ModelInferResponse:
         use_raw = InferenceServicer._GetReturnRaw(request)
-        payload = self._InsertHeaders(request, context)
+        payload = self._InsertHeaders(
+            request, context, use_buffers=self._raw_input_buffers
+        )
         result = await self._data_plane.infer(
             payload=payload, name=request.model_name, version=request.model_version
         )
@@ -125,9 +131,19 @@ class InferenceServicer(GRPCInferenceServiceServicer):
         return True if request.raw_input_contents else False
 
     def _InsertHeaders(
-        self, request: pb.ModelInferRequest, context: grpc.ServicerContext
+        self,
+        request: pb.ModelInferRequest,
+        context: grpc.ServicerContext,
+        use_buffers: bool = False,
     ) -> InferenceRequest:
-        payload = ModelInferRequestConverter.to_types(request)
+        if use_buffers:
+            from .buffers import convert_request
+
+            payload = convert_request(request)
+        else:
+            # Streaming retains the original public tensor representation.
+            # The compact path was measured for unary NumPy-backed inference.
+            payload = ModelInferRequestConverter.to_types(request)
         request_headers = to_headers(context)
         insert_headers(payload, request_headers)
         return payload

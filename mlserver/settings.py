@@ -429,6 +429,13 @@ class Settings(BaseSettings):
     grpc_max_message_length: int | None = None
     """Maximum length (i.e. size) of gRPC payloads."""
 
+    grpc_raw_input_buffers: bool = False
+    """Preserve raw FP32 buffers for unary gRPC and NumPy-compatible runtimes.
+
+    Enable only for runtimes whose input codecs accept NumPy-backed data.
+    Streaming and unsupported input representations retain normal conversion.
+    """
+
     # CORS settings
     cors_settings: CORSSettings | None = None
 

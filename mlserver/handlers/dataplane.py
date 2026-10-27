@@ -164,6 +164,15 @@ class DataPlane:
     def _prepare_payload(
         self, payload: InferenceRequest, model: MLModel
     ) -> InferenceRequest:
+        if self._settings.grpc_raw_input_buffers and (
+            model.settings.max_batch_size or model.settings.max_batch_time
+        ):
+            from ..grpc.buffers import restore_list_inputs
+
+            # Batching merges the public list representation. Keep compact
+            # NumPy buffers on the measured unbatched path, while preserving
+            # the existing batching contract without changing the batcher.
+            restore_list_inputs(payload)
         if payload.id is None:
             payload.id = generate_uuid()
 
