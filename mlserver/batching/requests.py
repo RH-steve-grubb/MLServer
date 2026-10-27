@@ -278,11 +278,11 @@ class BatchedRequests:
             }
         merged_parameters = _get_parameters(response_output)
         raw_parameters = parameters.model_dump()
-        idx = 0
 
         all_parameters = {}
-        # TODO: Don't rely on array to have been flattened
-        for internal_id, minibatch_size in self._minibatch_sizes.items():
+        # Parameter lists have one entry per request, regardless of how many
+        # data rows each request contains.
+        for idx, internal_id in enumerate(self._minibatch_sizes):
             parameter_args = {}
             for parameter_name, parameter_values in merged_parameters.items():
                 if parameter_name in ["content_type", "headers"]:
@@ -308,6 +308,5 @@ class BatchedRequests:
                 parameter_args["headers"] = merged_parameters["headers"]
             parameter_obj = Parameters(**parameter_args)
             all_parameters[internal_id] = parameter_obj
-            idx += minibatch_size
 
         return all_parameters

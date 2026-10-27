@@ -84,6 +84,46 @@ def test_split_response_preserves_scalar_parameter_for_each_request(value, batch
     assert split["request-2"].outputs[0].shape == [len(second_data)]
 
 
+@pytest.mark.parametrize("batch_sizes", [(2, 1, 1), (1, 2, 1), (2, 3, 2)])
+def test_split_response_matches_parameters_to_requests(
+    batch_sizes: tuple[int, int, int],
+) -> None:
+    requests = {
+        f"request-{idx}": InferenceRequest(
+            id=f"external-{idx}",
+            inputs=[
+                RequestInput(
+                    name="input",
+                    datatype="INT32",
+                    shape=[batch_size, 2],
+                    data=list(range(idx * 10, idx * 10 + batch_size * 2)),
+                    parameters=Parameters(
+                        tag=f"tag-{idx}",
+                        content_type="np",
+                        headers={"x-test": "batch"},
+                    ),
+                )
+            ],
+        )
+        for idx, batch_size in enumerate(batch_sizes)
+    }
+    batched = BatchedRequests(requests)
+    response = InferenceResponse(
+        model_name="test-model",
+        outputs=[ResponseOutput(**batched.merged_request.inputs[0].model_dump())],
+    )
+
+    split = batched.split_response(response)
+
+    for internal_id, request in requests.items():
+        output = split[internal_id].outputs[0]
+        request_input = request.inputs[0]
+        assert split[internal_id].id == request.id
+        assert output.parameters == request_input.parameters
+        assert output.data == request_input.data
+        assert output.shape == request_input.shape
+
+
 @pytest.mark.parametrize(
     "value",
     [
