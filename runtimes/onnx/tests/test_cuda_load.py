@@ -110,8 +110,11 @@ def loading(monkeypatch):
 
 def test_graph_setting_defaults_off(monkeypatch):
     monkeypatch.delenv("MLSERVER_MODEL_ONNX_CUDA_GRAPH", raising=False)
+    monkeypatch.delenv("MLSERVER_MODEL_ONNX_CUDA_BLOCKING_SYNC", raising=False)
     assert OnnxSettings().cuda_graph is False
+    assert OnnxSettings().cuda_blocking_sync is False
     assert get_onnx_settings(settings({})).cuda_graph is False
+    assert get_onnx_settings(settings({})).cuda_blocking_sync is False
 
 
 @pytest.mark.parametrize("file_value", [None, False, True])
@@ -289,3 +292,168 @@ async def test_unload_releases_the_graph_session_owner(loading):
     gc.collect()
     assert owned() is None and model._model is None
     assert model.inputs == [] and model.outputs == []
+
+
+@pytest.fixture
+def wait_policy(loading, monkeypatch):
+    def configure(device):
+        loading.events.append("configure-wait")
+        return {
+            "library": "/mock/libcudart.so.12",
+            "device_id": device,
+            "requested_flags": 4,
+            "before_session_flags": 12,
+        }
+
+    def read(library, device):
+        assert loading.session.get_providers.call_count >= 1
+        assert loading.session.get_provider_options.call_count >= 1
+        loading.events.append("read-wait")
+        return 12
+
+    configure_mock, read_mock = Mock(side_effect=configure), Mock(side_effect=read)
+    monkeypatch.setattr(runtime, "configure_blocking_sync", configure_mock)
+    monkeypatch.setattr(runtime, "read_device_flags", read_mock)
+    return SimpleNamespace(configure=configure_mock, read=read_mock)
+
+
+@pytest.mark.parametrize("file_value", [None, False, True])
+def test_blocking_setting_env_and_file_precedence(monkeypatch, file_value):
+    monkeypatch.setenv("MLSERVER_MODEL_ONNX_CUDA_BLOCKING_SYNC", "true")
+    extra = {} if file_value is None else {"cuda_blocking_sync": file_value}
+    assert get_onnx_settings(settings(extra)).cuda_blocking_sync is (
+        True if file_value is None else file_value
+    )
+
+
+async def test_blocking_wait_keeps_ordinary_run_options_and_does_not_enable_graph(
+    loading, wait_policy
+):
+    original = {"device_id": "2", "use_tf32": "0", "enable_cuda_graph": "0"}
+    model = OnnxModel(
+        settings(
+            {
+                "providers": ["CUDAExecutionProvider"],
+                "provider_options": original,
+                "cuda_blocking_sync": True,
+                "run_options": {"log_severity_level": 3},
+            }
+        )
+    )
+    loading.session.get_provider_options.return_value = {
+        "CUDAExecutionProvider": original
+    }
+    assert await model.load()
+    assert loading.events == ["configure-wait", "constructor", "read-wait", "metadata"]
+    wait_policy.configure.assert_called_once_with(2)
+    wait_policy.read.assert_called_once_with("/mock/libcudart.so.12", 2)
+    passed = loading.constructor.call_args.kwargs["provider_options"]
+    assert passed == [original] and passed[0] is not original
+    assert model._onnx_settings.provider_options == original
+    loading.wrap.assert_not_called()
+    await model.predict(request())
+    assert loading.session.run.call_args.kwargs["run_options"] is model._run_options
+    assert model._run_options.log_severity_level == 3
+    assert model._cuda_wait_policy["after_session_flags"] == 12
+    assert await model.unload()
+    assert model._cuda_wait_policy is None
+    # Unload releases model ownership, not the shared process/device policy.
+    wait_policy.configure.assert_called_once_with(2)
+    wait_policy.read.assert_called_once_with("/mock/libcudart.so.12", 2)
+
+
+async def test_combined_wait_is_verified_before_graph_wrapper(loading, wait_policy):
+    model = OnnxModel(
+        settings(
+            {
+                "providers": ["CUDAExecutionProvider"],
+                "provider_options": {"device_id": 2},
+                "cuda_graph": True,
+                "cuda_blocking_sync": True,
+            }
+        )
+    )
+    assert await model.load()
+    assert loading.events == [
+        "configure-wait",
+        "constructor",
+        "read-wait",
+        "wrap",
+        "metadata",
+    ]
+    loading.wrap.assert_called_once_with(loading.session, 2)
+    assert model._cuda_wait_policy == {
+        "library": "/mock/libcudart.so.12",
+        "device_id": 2,
+        "requested_flags": 4,
+        "before_session_flags": 12,
+        "after_session_flags": 12,
+    }
+
+
+async def test_default_cpu_load_does_not_configure_or_read_cuda(loading, wait_policy):
+    loading.session.get_providers.return_value = ["CPUExecutionProvider"]
+    model = OnnxModel(settings({}))
+    assert await model.load()
+    wait_policy.configure.assert_not_called()
+    wait_policy.read.assert_not_called()
+    loading.wrap.assert_not_called()
+    assert model._cuda_wait_policy is None
+
+
+@pytest.mark.parametrize(
+    "failure", ["configure", "readback", "fallback", "device", "constructor"]
+)
+async def test_blocking_wait_failure_is_a_load_error_without_verified_receipt(
+    loading, wait_policy, failure
+):
+    model = OnnxModel(
+        settings(
+            {
+                "providers": ["CUDAExecutionProvider"],
+                "provider_options": {"device_id": 2},
+                "cuda_blocking_sync": True,
+            }
+        )
+    )
+    if failure == "configure":
+        wait_policy.configure.side_effect = ModelLoadError("missing CUDA runtime")
+    elif failure == "readback":
+        wait_policy.read.side_effect = ModelLoadError("flags were changed")
+    elif failure == "fallback":
+        loading.session.get_providers.return_value = ["CPUExecutionProvider"]
+    elif failure == "device":
+        loading.session.get_provider_options.return_value = {
+            "CUDAExecutionProvider": {"device_id": "0"}
+        }
+    else:
+        loading.constructor.side_effect = RuntimeError("provider initialization failed")
+    with pytest.raises(ModelLoadError, match="Failed to load ONNX model"):
+        await model.load()
+    assert model._cuda_wait_policy is None and "metadata" not in loading.events
+    loading.wrap.assert_not_called()
+    if failure == "configure":
+        loading.constructor.assert_not_called()
+    if failure != "readback":
+        wait_policy.read.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"providers": ["CPUExecutionProvider"]},
+        {"providers": ["CUDAExecutionProvider"], "provider_options": {"device_id": -1}},
+        {
+            "providers": ["CUDAExecutionProvider"],
+            "provider_options": {"device_id": True},
+        },
+    ],
+)
+async def test_blocking_configuration_is_validated_before_cuda_calls(
+    loading, wait_policy, extra
+):
+    model = OnnxModel(settings({**extra, "cuda_blocking_sync": True}))
+    with pytest.raises(ModelLoadError):
+        await model.load()
+    wait_policy.configure.assert_not_called()
+    loading.constructor.assert_not_called()
