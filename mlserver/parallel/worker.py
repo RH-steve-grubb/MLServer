@@ -151,6 +151,11 @@ class Worker(Process):
         return readable
 
     async def _process_request(self, request) -> ModelResponseMessage:
+        if self._settings.rest_worker_json:
+            from ..rest.worker import RAW_INFER_METHOD, process_raw_request
+
+            if request.method_name == RAW_INFER_METHOD:
+                return await process_raw_request(self, request)
         try:
             model = await self._model_registry.get_model(
                 request.model_name, request.model_version

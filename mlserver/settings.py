@@ -420,6 +420,13 @@ class Settings(BaseSettings):
     http_port: int = 8080
     """Port where to listen for HTTP / REST connections."""
 
+    rest_worker_json: bool = False
+    """Parse and encode unary REST inference JSON in parallel model workers.
+
+    Nonparallel models, adaptive batching and other media types retain local
+    request preparation. Generate and streaming routes are unchanged.
+    """
+
     root_path: str = ""
     """Set the ASGI root_path for applications submounted below a given URL path."""
 
