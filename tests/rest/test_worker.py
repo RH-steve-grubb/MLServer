@@ -2,12 +2,14 @@ import asyncio
 import json
 from multiprocessing.reduction import ForkingPickler
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, Mock
 
 from fastapi import FastAPI
 from httpx import AsyncClient
+from prometheus_client import CollectorRegistry, values
 import pytest
 from pytest_mock import MockerFixture
 from starlette.requests import Request
@@ -39,6 +41,29 @@ def sum_model_settings(sum_model_settings: ModelSettings) -> ModelSettings:
     sum_model_settings.max_batch_size = 0
     sum_model_settings.max_batch_time = 0
     return sum_model_settings
+
+
+@pytest.fixture(params=["mutex", "multiprocess"])
+def metric_value_class(
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    value_class = values.MutexValue
+    if request.param == "multiprocess":
+        monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(tmp_path))
+        value_class = values.MultiProcessValue()
+    monkeypatch.setattr(values, "ValueClass", value_class)
+
+
+@pytest.fixture
+def worker_data_plane(
+    settings: Settings,
+    model_registry: MultiModelRegistry,
+    metric_value_class: None,
+    prometheus_registry: CollectorRegistry,
+) -> DataPlane:
+    return DataPlane(settings, model_registry)
 
 
 def request(body: bytes, headers: dict[str, str] | None = None) -> Request:
@@ -142,13 +167,14 @@ def test_json_content_types_keep_normal_input_schema(
 
 
 async def test_worker_preserves_dataplane_context_headers_ids_outputs_and_metrics(
-    settings: Settings,
-    model_registry: MultiModelRegistry,
+    worker_data_plane: DataPlane,
     sum_model: MLModel,
     inference_request: InferenceRequest,
     mocker: MockerFixture,
 ):
     inference_request.id = "inference-id"
+    settings = worker_data_plane._settings
+    model_registry = worker_data_plane._model_registry
     worker = cast(
         Worker, SimpleNamespace(_settings=settings, _model_registry=model_registry)
     )
@@ -160,7 +186,16 @@ async def test_worker_preserves_dataplane_context_headers_ids_outputs_and_metric
         return await original_predict(payload)
 
     mocker.patch.object(sum_model, "predict", side_effect=predict)
-    factory = mocker.spy(raw, "DataPlane")
+    success_counter = worker_data_plane._ModelInferRequestSuccess.labels(
+        model=sum_model.name, version=sum_model.version
+    )
+    # Registry cleanup does not reset multiprocess counter values. Seed prior
+    # successes so an assumed zero baseline fails regardless of test order.
+    success_counter.inc(2)
+    successes_before = success_counter._value.get()
+    # Observe the real DataPlane before dispatch without registering another
+    # set of collectors when the worker's lazy factory is called.
+    factory = mocker.patch.object(raw, "DataPlane", return_value=worker_data_plane)
     envelope = message(inference_request.model_dump_json().encode(), sum_model)
     for _ in range(2):
         response = await raw.process_raw_request(worker, envelope)
@@ -181,12 +216,8 @@ async def test_worker_preserves_dataplane_context_headers_ids_outputs_and_metric
     assert contexts == [(sum_model.name, sum_model.version)] * 2
     factory.assert_called_once_with(settings, model_registry)
     plane = getattr(worker, "_rest_raw_data_plane")
-    assert (
-        plane._ModelInferRequestSuccess.labels(
-            model=sum_model.name, version=sum_model.version
-        )._value.get()
-        == 2
-    )
+    assert plane is worker_data_plane
+    assert success_counter._value.get() == successes_before + 2
 
 
 async def test_worker_invalid_body_never_constructs_dataplane(
