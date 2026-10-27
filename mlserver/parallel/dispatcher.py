@@ -143,7 +143,7 @@ class Dispatcher:
         self._workers_round_robin = self._reset_round_robin()
         self._worker_starting_lock = asyncio.Lock()
         self._active = False
-        self._process_responses_task = None
+        self._process_responses_task: asyncio.Task | None = None
         self._executor = ThreadPoolExecutor()
         self._async_responses = AsyncResponses()
 
@@ -207,6 +207,8 @@ class Dispatcher:
             # restart
             return
         except Exception:
+            if not self._active:
+                return
             logger.exception("Response processing loop crashed. Restarting the loop...")
             # If process loop crashed, restart it
             self.start()
@@ -288,7 +290,12 @@ class Dispatcher:
         return await self._async_responses.schedule_and_wait(worker_update, worker)
 
     async def stop(self):
+        self._active = False
         self._ready_workers.clear()
-        self._executor.shutdown()
         if self._process_responses_task is not None:
+            # Cancelling an executor Future does not stop its Queue.get().
+            # Wake the reader before joining it, while the queue is still open.
+            if not self._process_responses_task.done():
+                self._responses.put(END_OF_QUEUE)
             await cancel_task(self._process_responses_task)
+        self._executor.shutdown()

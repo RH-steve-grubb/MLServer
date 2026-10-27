@@ -396,19 +396,21 @@ class InferencePool:
             cleanup_errors.append(e)
 
         try:
-            self._responses.close()
+            await self._dispatcher.stop()
         except Exception as e:
             logger.error(
-                f"Failed to close response queue on {self.name}",
+                f"Failed to stop dispatcher on {self.name}",
                 exc_info=True,
             )
             cleanup_errors.append(e)
 
         try:
-            await self._dispatcher.stop()
+            # The dispatcher's executor may still be reading this handle.
+            # Stop and join that reader before closing the queue.
+            self._responses.close()
         except Exception as e:
             logger.error(
-                f"Failed to stop dispatcher on {self.name}",
+                f"Failed to close response queue on {self.name}",
                 exc_info=True,
             )
             cleanup_errors.append(e)
