@@ -13,6 +13,7 @@ from functools import lru_cache
 from typing import (
     Any,
     ClassVar,
+    Literal,
     no_type_check,
     TYPE_CHECKING,
 )
@@ -355,6 +356,12 @@ class Settings(BaseSettings):
     parallel_workers: int = DEFAULT_PARALLEL_WORKERS
     """When parallel inference is enabled, number of workers to run inference
     across."""
+
+    parallel_inference_transport: Literal["queue", "zmq"] = "queue"
+    """Inference IPC transport; ZeroMQ requires the optional ``zmq`` extra.
+
+    Model-control messages retain multiprocessing queues in either mode.
+    """
 
     parallel_workers_timeout: int = 5
     """Grace timeout to wait until the workers shut down when stopping MLServer."""

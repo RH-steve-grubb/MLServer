@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from multiprocessing import Process, Queue
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
+from pathlib import Path
 
 from ..registry import MultiModelRegistry
 from ..model import MLModel
@@ -49,16 +50,26 @@ class Worker(Process):
         super().__init__()
         self._settings = settings
         self._responses = responses
+        self._zmq_request_endpoint: str | None = None
+        self._zmq_reply_endpoint: str | None = None
+        if settings.parallel_inference_transport == "zmq":
+            from .zmq import create_endpoint
+
+            reply = getattr(responses, "_zmq_reply_endpoint", None)
+            if not isinstance(reply, str) or not reply.startswith("ipc://"):
+                raise ValueError("ZeroMQ worker requires its pool's reply endpoint")
+            self._zmq_reply_endpoint = reply
+            self._zmq_request_endpoint = create_endpoint(Path(reply[6:]).parent, "q")
         self._requests: Queue[ModelRequestMessage] = Queue()
         self._model_updates: Queue[ModelUpdateMessage] = Queue()
         self._env = env
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
 
-        self.__executor = None
+        self.__executor: ThreadPoolExecutor | None = None
 
     @property
-    def _executor(self):
+    def _executor(self) -> ThreadPoolExecutor:
         """
         Helper property to initialise a threadpool executor on demand.
         This is required to avoid having to pickle the executor object into a
@@ -116,17 +127,54 @@ class Worker(Process):
 
     async def coro_run(self):
         self.__inner_init__()
+        if self._zmq_request_endpoint is None:
+            await self._run_control()
+            return
+
+        from .zmq import serve_requests
+
+        control = asyncio.create_task(self._run_control())
+        inference = asyncio.create_task(serve_requests(self))
+        try:
+            done, _ = await asyncio.wait(
+                (control, inference), return_when=asyncio.FIRST_COMPLETED
+            )
+            if control in done:
+                await control
+            else:
+                await inference
+                raise RuntimeError("ZeroMQ worker inference loop stopped unexpectedly")
+        finally:
+            self._active = False
+            # Cancelling the asyncio wrapper cannot interrupt select.poll in
+            # its executor thread. Wake that reader before joining it, or a
+            # failed data loop leaves this process alive at interpreter exit.
+            if not control.done():
+                await terminate_queue(self._model_updates)
+            control.cancel()
+            inference.cancel()
+            await asyncio.gather(control, inference, return_exceptions=True)
+            if self.__executor is not None:
+                self.__executor.shutdown()
+
+    async def _run_control(self) -> None:
+        # Retain the original queue loop for model updates and shutdown. The
+        # ZeroMQ data loop has its own process-local sockets and lifetime.
         loop = asyncio.get_running_loop()
+        # Multiprocessing exposes these descriptors for polling, although its
+        # public Queue type stubs omit the private implementation attributes.
+        request_reader = getattr(self._requests, "_reader")
+        update_reader = getattr(self._model_updates, "_reader")
         while self._active:
             readable = await loop.run_in_executor(self._executor, self._select)
             for r in readable:
-                if r is self._requests._reader:
+                if r is request_reader:
                     request = self._requests.get()
 
                     schedule_with_callback(
                         self._process_request(request), self._handle_response
                     )
-                elif r is self._model_updates._reader:
+                elif r is update_reader:
                     model_update = self._model_updates.get()
                     # If the queue gets terminated, detect the "sentinel value"
                     # and stop reading

@@ -3,6 +3,8 @@ import random
 
 from contextlib import nullcontext
 from multiprocessing import Queue
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from prometheus_client import Counter
 
@@ -121,6 +123,15 @@ class InferencePool:
         self._closing = False
         self._settings = settings
         self._responses: Queue[ModelResponseMessage] = Queue()
+        self._transport_directory: TemporaryDirectory[str] | None = None
+        if settings.parallel_inference_transport == "zmq":
+            from .zmq import create_endpoint
+
+            # Only endpoint strings cross spawn. The parent owns the private
+            # directory until workers and the response transport have stopped.
+            self._transport_directory = TemporaryDirectory(prefix="mlserver-ipc-")
+            reply = create_endpoint(Path(self._transport_directory.name), "r")
+            setattr(self._responses, "_zmq_reply_endpoint", reply)
         for _ in range(self._settings.parallel_workers):
             worker = _spawn_worker(
                 self._settings,
@@ -414,6 +425,12 @@ class InferencePool:
                 exc_info=True,
             )
             cleanup_errors.append(e)
+
+        if self._transport_directory is not None:
+            try:
+                self._transport_directory.cleanup()
+            except Exception as error:
+                cleanup_errors.append(error)
 
         if cleanup_errors:
             # Track cleanup failures

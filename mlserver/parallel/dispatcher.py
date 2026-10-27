@@ -1,6 +1,6 @@
 import asyncio
 
-from typing import cast
+from typing import cast, TYPE_CHECKING
 from collections import defaultdict
 from collections.abc import Awaitable, Iterator
 from itertools import cycle
@@ -25,6 +25,9 @@ from .messages import (
 from prometheus_client import Histogram
 
 QUEUE_METRIC_NAME = "parallel_request_queue"
+
+if TYPE_CHECKING:
+    from .zmq import ParentTransport
 
 
 class AsyncResponses:
@@ -111,10 +114,30 @@ class AsyncResponses:
         # (or other methods) get called from a separate thread (and a separate
         # AsyncIO loop)
         loop = future.get_loop()
+        loop.call_soon_threadsafe(self._complete, future, response)
+
+    @staticmethod
+    def _complete(
+        future: Future[ModelResponseMessage], response: ModelResponseMessage
+    ) -> None:
+        # Cancellation can run after resolve() schedules this callback. Check
+        # at completion time, not only when the response first arrives.
+        if future.done():
+            return
         if response.exception:
-            loop.call_soon_threadsafe(future.set_exception, response.exception)
+            future.set_exception(response.exception)
         else:
-            loop.call_soon_threadsafe(future.set_result, response)
+            future.set_result(response)
+
+    @staticmethod
+    def _fail(future: Future[ModelResponseMessage], error: BaseException) -> None:
+        if not future.done():
+            future.set_exception(error)
+
+    def fail_all(self, error: BaseException) -> None:
+        """Wake inference waiters if the optional response transport fails."""
+        for future in list(self._futures.values()):
+            future.get_loop().call_soon_threadsafe(self._fail, future, error)
 
     def cancel(self, worker: Worker, exit_code: int):
         """
@@ -132,7 +155,7 @@ class AsyncResponses:
             err = WorkerStop(exit_code)
             future = self._futures[message_id]
             loop = future.get_loop()
-            loop.call_soon_threadsafe(future.set_exception, err)
+            loop.call_soon_threadsafe(self._fail, future, err)
 
 
 class Dispatcher:
@@ -146,6 +169,12 @@ class Dispatcher:
         self._process_responses_task: asyncio.Task | None = None
         self._executor = ThreadPoolExecutor()
         self._async_responses = AsyncResponses()
+        self._transport: ParentTransport | None = None
+        reply = getattr(responses, "_zmq_reply_endpoint", None)
+        if reply is not None:
+            from .zmq import ParentTransport
+
+            self._transport = ParentTransport(reply)
 
     def _reset_round_robin(self) -> Iterator[int]:
         worker_pids = list(self._ready_workers.keys())
@@ -191,10 +220,16 @@ class Dispatcher:
             del self._ready_workers[pid]
 
         self._reset_round_robin()
+        if self._transport is not None and pid is not None:
+            self._transport.forget_worker(pid)
         self._async_responses.cancel(worker, exit_code)
 
     def start(self):
         self._active = True
+        if self._transport is not None:
+            self._transport.start(
+                self._async_responses.resolve, self._async_responses.fail_all
+            )
         self._process_responses_task = schedule_with_callback(
             self._process_responses(), self._process_responses_cb
         )
@@ -230,6 +265,19 @@ class Dispatcher:
         self, request_message: ModelRequestMessage
     ) -> ModelResponseMessage:
         worker, wpid = self._get_worker()
+        if self._transport is not None:
+            # Register before send: ZeroMQ can suspend and a response may
+            # arrive before send returns, unlike the old Queue.put boundary.
+            future = self._async_responses._schedule(request_message, worker)
+            try:
+                await self._transport.send(worker, request_message)
+            except BaseException:
+                if not future.cancel():
+                    if not future.cancelled():
+                        future.exception()
+                self._async_responses._clear_message(request_message.id)
+                raise
+            return await self._async_responses._wait(request_message.id)
         worker.send_request(request_message)
 
         return await self._async_responses.schedule_and_wait(request_message, worker)
@@ -292,6 +340,8 @@ class Dispatcher:
     async def stop(self):
         self._active = False
         self._ready_workers.clear()
+        if self._transport is not None:
+            await self._transport.close()
         if self._process_responses_task is not None:
             # Cancelling an executor Future does not stop its Queue.get().
             # Wake the reader before joining it, while the queue is still open.
