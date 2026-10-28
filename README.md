@@ -13,7 +13,7 @@ code and is independent of the implementation PR's history.
 
 The reports preserve the measured studies and their diagram prompts. They
 describe different workloads; the CPU OVMS measurements are not GPU results.
-The benchmark is a quick serving check, not the root profiling/tuning harness.
+The quick benchmark is a serving check. The [study guide](benchmarking/STUDY_GUIDE.rst) adds timed sweeps, raw samples, tuning and profiling instructions.
 Raw captures, generated requests, model weights and model binaries are not
 checked in. The preparation script downloads the public assets and generates
 the fixture locally.
@@ -62,3 +62,12 @@ make test
 
 These check the resource scripts and their loopback REST/gRPC clients. They do
 not download the model, run a performance study or launch GPU inference.
+
+## Reproducible studies
+
+- [Timed sweeps, payloads, accounting and worker/thread tuning](benchmarking/STUDY_GUIDE.rst)
+- [Root, CPU/GIL, host-stage and CUDA/NVTX profiling](benchmarking/PROFILING.rst)
+- [OpenShift predictor and route measurements](benchmarking/OPENSHIFT.rst)
+
+These guides and tools are reusable measurement resources. They do not choose
+implementation changes or define a project acceptance plan.

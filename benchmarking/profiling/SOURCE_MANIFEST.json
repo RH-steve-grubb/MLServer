@@ -1,0 +1,501 @@
+{
+  "scope": "Historical diagnostic tools; not the integrated production benchmark. No model, raw traces or performance reports included.",
+  "files": [
+    {
+      "path": "benchmarking/queueing/__init__.py",
+      "sha256": "1ad842b29fc394ff4cc5aa48b5706d4fc40d64bc641409f5b500281b1a3e1ef5"
+    },
+    {
+      "path": "benchmarking/queueing/aiohttp_frontend.py",
+      "sha256": "86b4e11222439b519fe70dbd79fa6f10139eff8125696179a90d8f6891822c17"
+    },
+    {
+      "path": "benchmarking/queueing/balance_scheduler.py",
+      "sha256": "49157fa64a4de0b753ba1393c528d918e969abf6596f55e21bd3a645fb2dbbe3"
+    },
+    {
+      "path": "benchmarking/queueing/bench.py",
+      "sha256": "f0ea4cb24041da76ec1e56fd45374f9ade40f5752b99d6ee51030a293a64b2f0"
+    },
+    {
+      "path": "benchmarking/queueing/free-threaded-env/poetry.lock",
+      "sha256": "20f054cb84513e3ebe15dc7ed551ef21e9cf2fcf42327fd07531d6cb1d3afeb9"
+    },
+    {
+      "path": "benchmarking/queueing/free-threaded-env/pyproject.toml",
+      "sha256": "073daa2faed0bbe1f8d59302500fa60dd8fb6a6db456115fc8782ecd341adde8"
+    },
+    {
+      "path": "benchmarking/queueing/free-threaded-env/run-profile.sh",
+      "sha256": "bb4ab5bbf95fbc7ecf1155b96dd5781d34aa9cf6dfabc6ed25b4f7acb6ec35d7"
+    },
+    {
+      "path": "benchmarking/queueing/free-threaded-zmq-env/poetry.lock",
+      "sha256": "7587ed7ef25e4a183e180982056e2e8b7ead93ab55e6143c375f0653eb5e79d2"
+    },
+    {
+      "path": "benchmarking/queueing/free-threaded-zmq-env/pyproject.toml",
+      "sha256": "ac424b679f7622157ebed96edfdba9644b08ca49dfdf401224313a9dcae2e31e"
+    },
+    {
+      "path": "benchmarking/queueing/free_threaded.py",
+      "sha256": "942407b9f218eb624ed9ce43c6e38172fa3094bccb2c7e5be6d955081f636790"
+    },
+    {
+      "path": "benchmarking/queueing/free_threaded_profile.py",
+      "sha256": "84f6b7159a6b3319e795bad66bc01be760d3ff7fce6e1cf1c9cc7e2c2c8a24c8"
+    },
+    {
+      "path": "benchmarking/queueing/frontend_offload.py",
+      "sha256": "42547efa94319167b5901f2b4bb6859d7f56c91b431dc213c7e2ecab8906ff5f"
+    },
+    {
+      "path": "benchmarking/queueing/gil_profile.py",
+      "sha256": "255cbbcbadbb5289b01bcab9e43a55756fdfa959f2d14000f0b9f04eed629e20"
+    },
+    {
+      "path": "benchmarking/queueing/http-parser-env/poetry.lock",
+      "sha256": "e24fd0b1fbd39ceed06c7705323f4b7d3f8c88f4c195fcf47ce73963ff0c8aca"
+    },
+    {
+      "path": "benchmarking/queueing/http-parser-env/pyproject.toml",
+      "sha256": "422e2c072fc2319087c42cec9612f1558e85693fe825bf0616b067981c8e04a2"
+    },
+    {
+      "path": "benchmarking/queueing/http_parser.py",
+      "sha256": "542ca2a63d6617bec9fa19162b65cfc9c6d2ee47d1dc449abfbf578fc9227dc2"
+    },
+    {
+      "path": "benchmarking/queueing/msgpack_codec.py",
+      "sha256": "181fc8f69ddeb20194161f6f5637a7ca206a352f3d8526b248135af94f2a6330"
+    },
+    {
+      "path": "benchmarking/queueing/native_client.py",
+      "sha256": "63e4fceba9c9e8db91d407862cc8edc0d0190fe4a79830423e9d71c2d5e1d65f"
+    },
+    {
+      "path": "benchmarking/queueing/onnx-baseline-env/poetry.lock",
+      "sha256": "0389248bdcab41135d7e7c8df6bcafd7dd797ef212a1ea8044421e87bee7aaf3"
+    },
+    {
+      "path": "benchmarking/queueing/onnx-baseline-env/pyproject.toml",
+      "sha256": "01de34439911a24376c0805d73d9d1dc8befead01a6d94e1e8b2373d19bcf9b3"
+    },
+    {
+      "path": "benchmarking/queueing/pipe_bench.py",
+      "sha256": "b8ee652cf5394e9a6185eeeec986dd12fe00152c4c49c8faea16ca8a57180da9"
+    },
+    {
+      "path": "benchmarking/queueing/probe.py",
+      "sha256": "14f88ed88e69cb0f377877db5f5f048b37fb4590261b48fd13e2af09be03e4df"
+    },
+    {
+      "path": "benchmarking/queueing/py314_gil_project/poetry.lock",
+      "sha256": "71b1af3a2249f1f3774073ddc6ebebda68b1682d4de3a35590fe4a7df3e24480"
+    },
+    {
+      "path": "benchmarking/queueing/py314_gil_project/pyproject.toml",
+      "sha256": "8f27baf8362f4604b1fef5d13aaf6042b1cf3069d64dd93a468b5afac575a871"
+    },
+    {
+      "path": "benchmarking/queueing/raw_worker.py",
+      "sha256": "556c53c07e5d978271b8c976ed844835be803ec60c8f604cadaf78bec76e89f5"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/export-env/poetry.lock",
+      "sha256": "120369044c319c42488a548a6eb93e598704d96e383ee03a41f2cef827fd335c"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/export-env/pyproject.toml",
+      "sha256": "0c1ac01a68d3ad90596a6356812933d4878af96ac1f54396f5cb916643b5757a"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_baseline.py",
+      "sha256": "f7f2a64a5d40da6f789a3a66463e454a6ebac1e0d27252c9d3f629daa8567631"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_buffers.py",
+      "sha256": "688b5daf61005179a504ce963cdb566997c40033d11f2029d5cf779e63b624f7"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_cuda_analyze.py",
+      "sha256": "6308e340b9ebaa2e121198992f1304dbc04e03764deed0ed313aac3c5311b483"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_cuda_summary.py",
+      "sha256": "2be7e7769f90528114ae1a94060ceadf9af0afbcd2a71913c93223b1b16a5c03"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_engine.py",
+      "sha256": "c355cbef8d09382360dfa8d5b6021c8eeaa45148f2cfe4073565cb178261ed13"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_engine_compare.py",
+      "sha256": "6a286affe0a51f02d23eea0f1d25ab8bbc1b183b1252277706b155949e8a8492"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_engine_screen.py",
+      "sha256": "430c9dde32234bae6884b95107ee64f5f6a2e799012f6747ff944122779237d0"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_experiment.py",
+      "sha256": "b49d071f5e07154db776d9a9f9e6b63c2b719f2bf15a874ddf7e47735fef6531"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_grpc_confirm.py",
+      "sha256": "905b4f35d5ec9424fdd2b683b49573ea28f52d92268213619095ef4b67001e42"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_inject_compare.py",
+      "sha256": "142c645ed9748dff3aca2f0ad3719738844a8799ad6c613c56f4c74203a3a0e6"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_load.py",
+      "sha256": "e80923077311fa03aed56a9d1c56b59c6567336807a5f07df0a6ab02583099c0"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_nvtx.c",
+      "sha256": "36b0081cec6c6fa6dff1c213781479491728faaef1b187c14edaa76693d6e0fa"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_perf.py",
+      "sha256": "a65713cd80886f457539ba378765a6ea85fab94f972c43b61463a86a526c4034"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_rest_engine_compare.py",
+      "sha256": "275be2c7bc8e561d09001c6a3a1da29257a411f35b12d5179a45c30890b36ade"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_rest_fresh_inputs.py",
+      "sha256": "08da97d6fb908ae1bc4c1dbb8161013ccc29d77e6c0fa1c0defdb6243578abac"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_server.py",
+      "sha256": "c462495b7c01ac8f87f45b8bba7c7070047d837b3f9ab654738c497ee50235b6"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_stage_summary.py",
+      "sha256": "2a127b1aa15400771ad676e7da81261de0728b7f33a383eb006fe321eb4d7c02"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_stages.py",
+      "sha256": "454349aaebd80184f4cc2af7299e3d5409e5496ec3af94901f7810bf8410ac03"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_study.py",
+      "sha256": "0ef4b6f289a7b7bf108350a53456ae88843d07e2363ba78ec91320403d3197e4"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_tools.py",
+      "sha256": "73daf058faec6173551b5c1232b42d39311bb2b5982bc5ac4bd6931464b23d57"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_transport.py",
+      "sha256": "a7967209bd19a5e1d91f96ef1ad7818f014b7460c6ecc4c48036d1a6c168ef2c"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_transport_compare.py",
+      "sha256": "c221c57e1ba49700315af4a8735137d19d22be82f756ce09339bea1344a3a9d7"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_winner_profile.py",
+      "sha256": "8a97fbe5c462812815c30597c1dc21979ab33274eb38c19be512e70df949d056"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/gpu_worker_json.py",
+      "sha256": "568c9b231b7fda0a835674d3188d647f23994e39ac20bc27c070a05b44687539"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/prepare.py",
+      "sha256": "50a63c9b0f2f831fd44d7fcf121b6c00ef944c91a358e2db538cda0d3a829218"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/serve.py",
+      "sha256": "d882f15fbc9e3a138e018d39c37cf7255eda4be08511b90301b207ed2a7835ff"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/serving-env/poetry.lock",
+      "sha256": "fe0a6ec5a9503bfe7bfdca49d662cbd388b30e35dda66df5034e5c566795af8e"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/serving-env/pyproject.toml",
+      "sha256": "4c6affd2ff9296eb3946e0252e6c7226ec28c7eed05dcaced3f782df394ebff3"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_baseline.py",
+      "sha256": "f7b91987063dd1f114a3989a03484963b928118776b15aff061c2b9c6331612c"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_buffers.py",
+      "sha256": "86080dbac11d0380d01f0310fb1edfdf58b7af81f5f8019f4435290fe31f63c8"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_cuda_analyze.py",
+      "sha256": "2d7f3f797c681f86985a7c0a41657e0ff8a736a84ffc44a996abb229ff134a2f"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_cuda_summary.py",
+      "sha256": "e22892dfc631dfa14544593fadb857974fc3b477396bf553aa770247efd7b530"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_engine.py",
+      "sha256": "4199ecf7cfbea7da379d695339a08a309002fa9f65b50489c3c33d3c71cea35e"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_engine_compare.py",
+      "sha256": "cc04b18f74b0570053c08f75005a1aa11658a4b016c2822cc4ff790e87276347"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_engine_screen.py",
+      "sha256": "de45ff314f24d4d6b3767cd09c2c9250d3bb68cb532a641c290974200b012511"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_experiment.py",
+      "sha256": "39afdbbb0d11a1fbe316891ed03e5143f956fd7454c96ca98ab23579806ff5bf"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_grpc_confirm.py",
+      "sha256": "16f0b56114446b9da46f5138a6f5c0c06dddb7c7627504bba50585d6fd2a1a4d"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_inject_compare.py",
+      "sha256": "cb7b17bff8c278882f4eaaf7c8517764ce9e6dbdc08f280abd7a2f4f83a78243"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_load.py",
+      "sha256": "bade0928a98c52b85b3941e86f106b93f2d129de631ea8e71b309899ee858537"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_perf.py",
+      "sha256": "c95d954b58bfb133e6e64e3dca9f3c341e1cbf481e2951198e17664ccab7d31a"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_rest_engine_compare.py",
+      "sha256": "c67d95a6cc8fb7fded53381a4dfc97b7da8fcc2d14da4a98b042543d7e4a438b"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_rest_fresh_inputs.py",
+      "sha256": "c56ccb62fddde0563251b7d15a313bef3b4140b6ee16724a528103a97aa7cefc"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_stage_summary.py",
+      "sha256": "aeb4b1bf318fea286258456a4d187c9897a51181f838aebf623cf83ca1aae834"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_stages.py",
+      "sha256": "2187bbd816aacfc95a4cd4fa63ede74c6efee3d125ec83d02f2e7920de59a9a1"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_study.py",
+      "sha256": "5c947139ac67ba58ec114845ec4bda25e56245970fdc3a858705f3cdb58f474e"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_tools.py",
+      "sha256": "3c8efd3dca3bcddf76fddf7a1d87ff5dc350fa93d5430a47e40e4565dd2c7ef1"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_transport.py",
+      "sha256": "07b95e7de67c10d0a8a1e0b4d0b6b29cbc6fe36b9dd5834d9c4eb80874c82a95"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_transport_compare.py",
+      "sha256": "b9898370d3172834d200472e838c3525b37209d3448b9986396057930bbf6bf1"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_winner_profile.py",
+      "sha256": "b4e77f369cc3b28045c57dfb4f4832999a73039ca7176dee53db9a1ed7fd315f"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_gpu_worker_json.py",
+      "sha256": "bac271a158953d08ea27cc14f55b7cdd176b3998f5b5e9159967bcf002c66fdb"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/test_prepare.py",
+      "sha256": "aff8faf3beea6ca0e1cef92d628507466cf83ff9f6cd0380a3f6ad59e8595166"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/transport-env/poetry.lock",
+      "sha256": "02331ad2487fc443f15483586e8553d1aaf4c2cece1f92b4d22617e31d99b277"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/transport-env/pyproject.toml",
+      "sha256": "986cf2e944fbccc7c75571e6aec3ddd985b92a106b790aac976f63ea69da97de"
+    },
+    {
+      "path": "benchmarking/queueing/rfdetr/validate.py",
+      "sha256": "18211b126dbb9c9cd06653aecffbb8cc03a4854bbfd6fcfc9415165244bc42c4"
+    },
+    {
+      "path": "benchmarking/queueing/run_frontend_offload.py",
+      "sha256": "cad0ef06689166282d3d8a1b2d1d8d0550361c2a518b1dcbacf62b4734698cdb"
+    },
+    {
+      "path": "benchmarking/queueing/run_frontend_offload.sh",
+      "sha256": "38958fc115219d00b083a1269f991f0034e295806944c2cb5442d05858bee804"
+    },
+    {
+      "path": "benchmarking/queueing/run_frontend_transport.py",
+      "sha256": "c7d8f1b62152ef6725dc7da62ee330f30a5fc68eee54c3b113e9e55d6b21f62c"
+    },
+    {
+      "path": "benchmarking/queueing/run_frontend_transport.sh",
+      "sha256": "a4ef0fcfb17fba667c9d873c9267707527b7049b8d7e366425d00e62280535e4"
+    },
+    {
+      "path": "benchmarking/queueing/run_fused_json.py",
+      "sha256": "9de17e19a94170b49f06f1da816a0e8d041fe199a6b105a53d206a1d66720bc2"
+    },
+    {
+      "path": "benchmarking/queueing/run_fused_json.sh",
+      "sha256": "697bf2fa34c01741458ba721525bd5bfdb7b4ad11f45ef3d520240853cbb20f6"
+    },
+    {
+      "path": "benchmarking/queueing/run_http_experiments.py",
+      "sha256": "0ac2910719680b40489cf3559fda3a54cfbcd23218194fb29c4e2c1c5c5aa45a"
+    },
+    {
+      "path": "benchmarking/queueing/run_parser_experiments.py",
+      "sha256": "755dc856de54b11208204b468d32419c528b756d74787cf5f9ef4036cb86d323"
+    },
+    {
+      "path": "benchmarking/queueing/run_pending_experiments.py",
+      "sha256": "caf2c0d62de8ad8c7a486619e4de1b6c44b69ddf062dfc2eefd8cbcfea466dec"
+    },
+    {
+      "path": "benchmarking/queueing/run_scheduler_experiment.py",
+      "sha256": "6c6a0ea4061bd030b34abaf375bbb383fe8db5cb6457c10511795bd6b035b13e"
+    },
+    {
+      "path": "benchmarking/queueing/run_scheduler_experiment.sh",
+      "sha256": "396ed650b9591ec21b1d2ddc8765dba0d865fad2197cdc57f91ce405f107b140"
+    },
+    {
+      "path": "benchmarking/queueing/run_zmq_experiment.py",
+      "sha256": "ce245e8cb09095306a9fb8bc443ba4d10c6e80c57c3c91ab405d918ff8d3383a"
+    },
+    {
+      "path": "benchmarking/queueing/single_client.py",
+      "sha256": "2cc4e2310e075d5e556851cb54f14a6e77b7bf940f2fe62c54ce2b4a27f428ed"
+    },
+    {
+      "path": "benchmarking/queueing/single_compare.py",
+      "sha256": "f61dc3b012854e767133225e29b55a78f62241524066f1d8122f7838b7c41e45"
+    },
+    {
+      "path": "benchmarking/queueing/single_server.py",
+      "sha256": "2ff4c32cbeddbcf287fdee0cbb5096b98cee4947ef99a31efc81b37035fd93c1"
+    },
+    {
+      "path": "benchmarking/queueing/summarize.py",
+      "sha256": "22585f35d3dd858c0efc65deb60b434f97cba40716db62ec70404342642e67ae"
+    },
+    {
+      "path": "benchmarking/queueing/tensor_dispatch.py",
+      "sha256": "0e8187b7a47e476d954486a2fd22f4393f18907425d16b76b40fa3fb643542be"
+    },
+    {
+      "path": "benchmarking/queueing/test_aiohttp_frontend.py",
+      "sha256": "dabf49b28ce0f49bf0e906c3c7a23694e33376a8de2054ce94ed4263b05b0611"
+    },
+    {
+      "path": "benchmarking/queueing/test_balance_scheduler.py",
+      "sha256": "1f8865feae94d01b0da9c7b908c68a2e842822916348fc71ead8757f652aace2"
+    },
+    {
+      "path": "benchmarking/queueing/test_free_threaded.py",
+      "sha256": "707aaffa60ee8a2e5ab970a06cd8591af776031898b440cfc5d3e7d954d53a85"
+    },
+    {
+      "path": "benchmarking/queueing/test_free_threaded_profile.py",
+      "sha256": "1cf5dd63384591f1ba5c9aa1e9ca2406823cd20ee6aa8e00db448865affb152c"
+    },
+    {
+      "path": "benchmarking/queueing/test_frontend_offload.py",
+      "sha256": "6c0311c0e5ae205e334655aeaf545473ff7c90c4b6a7bf7cce143b065a130841"
+    },
+    {
+      "path": "benchmarking/queueing/test_frontend_transport.py",
+      "sha256": "c89597f6ac6c0598070ce822ac7be4de1d03dafa811e452e5105b150c8131bfd"
+    },
+    {
+      "path": "benchmarking/queueing/test_fused_json.py",
+      "sha256": "8563c91ac25296c21d2368efdb9166a963fcb8607102cc3bf44ea46cf1277db6"
+    },
+    {
+      "path": "benchmarking/queueing/test_gil_profile.py",
+      "sha256": "8b34b873f0603c204bf095976d3f82ef798562397fd25b2dc93f7ec06c4726be"
+    },
+    {
+      "path": "benchmarking/queueing/test_http_experiments.py",
+      "sha256": "482967b56ec209fe1d84d5dac71efe1dd998d3940f631e736543f4a99860a32e"
+    },
+    {
+      "path": "benchmarking/queueing/test_http_parser.py",
+      "sha256": "cf5eed8172aebc02c14184afa1c1e792b5df50d42e74d9f7335aeebfe0d2d213"
+    },
+    {
+      "path": "benchmarking/queueing/test_msgpack_codec.py",
+      "sha256": "a732f155a11e6901c7e1e3b0e669fb430626a1d027559fabab176ecd32b0e436"
+    },
+    {
+      "path": "benchmarking/queueing/test_native_client.py",
+      "sha256": "f397a4ebf495fcb64258c4fc037b942f41e3543cf1b77e1058355a5e1e53116d"
+    },
+    {
+      "path": "benchmarking/queueing/test_pending_experiments.py",
+      "sha256": "668e036b3578aeb4bc75a0040018951891b55687112e0fabab12779f6572dad0"
+    },
+    {
+      "path": "benchmarking/queueing/test_raw_worker.py",
+      "sha256": "b13652029371a81fb6d889049832905de2513a6a0d0eaf73ec4c0fd18fc9838d"
+    },
+    {
+      "path": "benchmarking/queueing/test_run_zmq_experiment.py",
+      "sha256": "7aed683beac25f2b8cd9bad103ee01adb3ef3ae0e513487cd5c6d1c1a0290619"
+    },
+    {
+      "path": "benchmarking/queueing/test_scheduler_experiment.py",
+      "sha256": "3d1100136eff0cd6c8e5cc60fcf0e61f8f3e8fb2b8583e19c5fb3081613f3338"
+    },
+    {
+      "path": "benchmarking/queueing/test_single_client.py",
+      "sha256": "f177969b7b83ee5bde77a1b5f77fa713e9423ba0adf94a44de14dd2c73da4393"
+    },
+    {
+      "path": "benchmarking/queueing/test_single_compare.py",
+      "sha256": "28d7276be111c158c94f3008ed47c8957a500b9963475576d81928f2a7c25a81"
+    },
+    {
+      "path": "benchmarking/queueing/test_tensor_dispatch.py",
+      "sha256": "e99a4512eff93a6030c932f7bb4c2826196ea497ee5ccfeac95cdb77bc1e01b8"
+    },
+    {
+      "path": "benchmarking/queueing/test_worker_balance.py",
+      "sha256": "b489252e110edd28fef41f7267d43f3ab0e92793b444327ebbb63362858a6b0b"
+    },
+    {
+      "path": "benchmarking/queueing/test_worker_json_startup.py",
+      "sha256": "50af81989c41c8fef3d2926742c5e160f4e3130ed26bb4a12ebabfd12d48ea5b"
+    },
+    {
+      "path": "benchmarking/queueing/test_zmq_transport.py",
+      "sha256": "28502d86ae2371f2dd50a4d57c4a1c27467e03c7d1c5a392c3ca1078a9e0033b"
+    },
+    {
+      "path": "benchmarking/queueing/worker_balance.py",
+      "sha256": "13cb76e046fa68e1c51532bca26be6f04e641c91461a13f911441cea3bec8116"
+    },
+    {
+      "path": "benchmarking/queueing/zeromq-env/poetry.lock",
+      "sha256": "ee8af3709e10a3f56796128d4950fc86cea703cd4610d18193bcf7f27485e3e6"
+    },
+    {
+      "path": "benchmarking/queueing/zeromq-env/pyproject.toml",
+      "sha256": "906251514184fe202dec2af89da5c98ecf29117f6af313d79a51706cbcc1b2dc"
+    },
+    {
+      "path": "benchmarking/queueing/zmq_transport.py",
+      "sha256": "10161c0c4686922c3ff38682a155f0db2512d1d0208ed6645b3a1c528f11dfdf"
+    }
+  ]
+}

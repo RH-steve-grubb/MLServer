@@ -52,3 +52,7 @@ The client leaves the server running. It measures serving throughput and client
 latency; it does not measure server CPU, GPU utilization or GIL waiting. Reserve
 CPU capacity for the client, or run it on a separate machine, when checking a
 fast server. The [reports](../reports/README.md) describe the fuller studies.
+
+For timed sweeps, per-request samples, multiple clients, HTTPS routes, server
+accounting, and worker/thread tuning, use the [study guide](STUDY_GUIDE.rst).
+It also links the root profiling and OpenShift how-tos.

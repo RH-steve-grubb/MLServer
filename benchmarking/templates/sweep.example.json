@@ -1,0 +1,34 @@
+{
+  "session": "session-a",
+  "round_offset": 0,
+  "rounds": 3,
+  "concurrency": [1, 2, 4, 8, 16],
+  "clients": 2,
+  "seconds": 60,
+  "warmup_seconds": 10,
+  "warmup_requests": 256,
+  "timeout_seconds": 120,
+  "ready_timeout_seconds": 300,
+  "prepare_timeout_seconds": 600,
+  "max_start_lateness_ms": 20,
+  "variants": [
+    {
+      "name": "before",
+      "prepare_argv": ["/bin/bash", "REPLACE_ABSOLUTE_RESTART_SCRIPT", "before"],
+      "spec": {
+        "protocol": "rest",
+        "url": "https://REPLACE_AUTHORIZED_ROUTE/v2/models/rfdetr-small/infer",
+        "payloads": ["REPLACE_ABSOLUTE_PAYLOAD_DIRECTORY/j0-0.bin"]
+      }
+    },
+    {
+      "name": "after",
+      "prepare_argv": ["/bin/bash", "REPLACE_ABSOLUTE_RESTART_SCRIPT", "after"],
+      "spec": {
+        "protocol": "rest",
+        "url": "https://REPLACE_AUTHORIZED_ROUTE/v2/models/rfdetr-small/infer",
+        "payloads": ["REPLACE_ABSOLUTE_PAYLOAD_DIRECTORY/j0-0.bin"]
+      }
+    }
+  ]
+}
