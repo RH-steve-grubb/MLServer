@@ -1,0 +1,91 @@
+{
+  "model": "RF-DETR Small, official COCO checkpoint",
+  "rfdetr_version": "1.11.2",
+  "mlserver_commit": "ac5babeff4ecf5a1359c55dc354932cc4429b7cd",
+  "python": "3.12.13 (main, May 10 2026, 19:30:01) [Clang 22.1.3 ]",
+  "versions": {
+    "rfdetr": "1.11.2",
+    "torch": "2.9.0+cpu",
+    "torchvision": "0.24.0+cpu",
+    "onnx": "1.21.0",
+    "onnxruntime": "1.23.2",
+    "numpy": "2.2.6"
+  },
+  "checkpoint": {
+    "url": "https://repo.roboflow.com/rfdetr/small_coco/checkpoint_best_regular.pth",
+    "md5": "fb37061c1af7bace359c91b723a8d5c1",
+    "sha256": "d81979a9213a2109345158ce9232668df4c1ae52e9b8db3f2ec0a8cbad959b33"
+  },
+  "sample": {
+    "url": "https://s3.amazonaws.com/images.cocodataset.org/val2017/000000039769.jpg",
+    "sha256": "dea9e7ef97386345f7cff32f9055da4982da5471c48d575146c796ab4563b04e",
+    "image_size_wh": [
+      640,
+      480
+    ]
+  },
+  "onnx": {
+    "path": "model/model.onnx",
+    "sha256": "a018914e11d589b8b51154f00ed1103f148a320a3960f768bd44f57d55d0ab51",
+    "bytes": 114429235,
+    "opset": 17,
+    "inputs": [
+      {
+        "name": "input",
+        "shape": [
+          1,
+          3,
+          512,
+          512
+        ],
+        "type": "tensor(float)"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "dets",
+        "shape": [
+          1,
+          300,
+          4
+        ],
+        "type": "tensor(float)"
+      },
+      {
+        "name": "labels",
+        "shape": [
+          1,
+          300,
+          91
+        ],
+        "type": "tensor(float)"
+      }
+    ],
+    "initializer_elements": 28507150
+  },
+  "normalization": {
+    "scale": "pixel / 255",
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ]
+  },
+  "input_bytes": 3145728,
+  "rest_request_bytes": 15259725,
+  "output_bytes": 114000,
+  "cpu_validation": {
+    "onnx_checker": "passed",
+    "detection_parity": "passed: same count/classes, IoU >= 0.95, score delta <= 0.02",
+    "detections_at_0_5": 6,
+    "raw_max_absolute_difference": {
+      "dets": 0.00015729665756225586,
+      "labels": 0.00028228759765625
+    }
+  }
+}

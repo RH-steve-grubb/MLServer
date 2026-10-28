@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "mlserver-rfdetr-small-export"
+version = "0.0.0"
+description = "Isolated, reproducible RF-DETR Small ONNX export"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+rfdetr = {version = "1.11.2", extras = ["onnx"]}
+torch = {version = "2.9.0+cpu", source = "pytorch-cpu"}
+torchvision = {version = "0.24.0+cpu", source = "pytorch-cpu"}
+numpy = "2.2.6"
+onnx = "1.21.0"
+onnxruntime = "1.23.2"
+
+[[tool.poetry.source]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+priority = "explicit"
