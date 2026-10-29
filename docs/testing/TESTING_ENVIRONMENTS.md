@@ -47,6 +47,21 @@ poetry run tox -e mlserver-venv
 poetry run tox -e all-runtimes-venv
 ```
 
+### With ZeroMQ
+
+The optional transport has dedicated environments that install the `zmq` extra
+inside tox and fail immediately if it cannot be imported:
+
+```bash
+poetry run tox -e mlserver-venv-zmq
+poetry run tox -e all-runtimes-venv-zmq
+```
+
+These run the same suites, with the same parallel/serial ordering, as their
+default counterparts. PR CI runs both venv variants across Python 3.10–3.12;
+combined-runtime conda tests remain push-only. The final **Test results** job
+fails if any required job fails, is cancelled, or is skipped.
+
 ### With Conda
 
 ```bash
@@ -136,7 +151,7 @@ def get_python_versions() -> list[tuple[int, int]]:
 
 ### Tox Environments
 
-MLServer provides four tox environments:
+The four base environments select core/combined suites and venv/conda behavior:
 
 | Feature | `mlserver-venv` | `mlserver-conda` | `all-runtimes-venv` | `all-runtimes-conda` |
 |---------|-----------------|-------------------|---------------------|----------------------|
