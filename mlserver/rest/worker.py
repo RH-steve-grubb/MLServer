@@ -23,6 +23,7 @@ from starlette.responses import Response
 from ..codecs.json import decode_from_bytelike_json_to_dict, encode_to_json_bytes
 from ..errors import ModelNotReady
 from ..handlers import DataPlane
+from ..parallel.logging import logger
 from ..types import InferenceRequest, InferenceResponse
 from ..utils import extract_headers, insert_headers
 
@@ -166,6 +167,12 @@ async def process_raw_request(
         )
         return ModelResponseMessage(id=request.id, return_value=reply)
     except (Exception, asyncio.CancelledError) as error:
+        # Returning an error envelope bypasses Worker._process_request's usual
+        # exception handler. Log here once while the original traceback exists.
+        logger.exception(
+            "An error occurred calling method 'predict' from model '%s'.",
+            request.model_name,
+        )
         failure = WorkerError(error)
         # Exception attributes survive Queue/ZeroMQ pickling. Error replies
         # must exclude worker JSON conversion from the public timer too.
