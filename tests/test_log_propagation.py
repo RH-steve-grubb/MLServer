@@ -14,6 +14,7 @@ Tests cover:
 """
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -242,7 +243,7 @@ class TestOnnxLogSeverityMapping:
     reason="mlserver-onnx not installed",
 )
 class TestOnnxBuildSessionOptions:
-    """Tests for _build_session_options auto-set and user-override semantics."""
+    """Tests for explicit per-model severity and user-override semantics."""
 
     def test_returns_session_options_when_settings_none(self):
         from mlserver_onnx.settings import OnnxSettings
@@ -252,41 +253,38 @@ class TestOnnxBuildSessionOptions:
         settings = OnnxSettings(session_options=None)
         result = _build_session_options(settings)
         assert isinstance(result, ort.SessionOptions)
+        assert result.log_severity_level == ort.SessionOptions().log_severity_level
 
-    def test_auto_sets_log_severity_from_mlserver_level(self):
+    def test_applies_explicit_debug_severity(self):
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
-        _set_mlserver_level(logging.DEBUG)
         settings = OnnxSettings(session_options=None)
-        result = _build_session_options(settings)
+        result = _build_session_options(settings, log_severity=0)
         assert result.log_severity_level == 0  # DEBUG → 0
 
-    def test_auto_sets_warning_severity(self):
+    def test_applies_explicit_warning_severity(self):
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
-        _set_mlserver_level(logging.WARNING)
         settings = OnnxSettings(session_options=None)
-        result = _build_session_options(settings)
+        result = _build_session_options(settings, log_severity=2)
         assert result.log_severity_level == 2  # WARNING → 2
 
     def test_respects_user_supplied_log_severity(self):
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
-        _set_mlserver_level(logging.DEBUG)
         settings = OnnxSettings(session_options={"log_severity_level": 4})
-        result = _build_session_options(settings)
+        result = _build_session_options(settings, log_severity=0)
         assert result.log_severity_level == 4  # user override wins
 
-    def test_auto_sets_when_other_session_options_present(self):
+    def test_applies_severity_with_other_session_options(self):
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
-        _set_mlserver_level(logging.ERROR)
         settings = OnnxSettings(session_options={"inter_op_num_threads": 2})
-        result = _build_session_options(settings)
+        result = _build_session_options(settings, log_severity=3)
         assert result.log_severity_level == 3  # ERROR → 3
         assert result.inter_op_num_threads == 2
 
@@ -338,6 +336,50 @@ class TestOnnxConfigureFrameworkLogger:
             settings = _make_settings()
             OnnxModel(settings)
             assert not mock_ort.set_default_logger_severity.called
+
+    @pytest.mark.parametrize("override", [None, 4])
+    async def test_load_uses_each_models_captured_severity(self, mocker, override):
+        from mlserver.settings import ModelParameters
+        from mlserver_onnx.onnx import OnnxModel
+
+        mocker.patch(
+            "mlserver_onnx.onnx.get_model_uri", AsyncMock(return_value="model.onnx")
+        )
+        mocker.patch("mlserver_onnx.onnx.onnx.load")
+        mocker.patch(
+            "mlserver_onnx.onnx._extract_metadata",
+            return_value={"inputs": [], "outputs": []},
+        )
+        session = MagicMock()
+        session.get_providers.return_value = ["CPUExecutionProvider"]
+        session.get_inputs.return_value = [SimpleNamespace(name="input")]
+        session.get_outputs.return_value = [SimpleNamespace(name="output")]
+        constructor = mocker.patch(
+            "mlserver_onnx.onnx.ort.InferenceSession", return_value=session
+        )
+        extra = (
+            {"session_options": {"log_severity_level": override}}
+            if override is not None
+            else {}
+        )
+        _set_mlserver_level(logging.DEBUG)
+        first = OnnxModel(
+            _make_settings("first", parameters=ModelParameters(extra=extra))
+        )
+        _set_mlserver_level(logging.ERROR)
+        second = OnnxModel(
+            _make_settings("second", parameters=ModelParameters(extra=extra))
+        )
+        # Changing the logger after construction must not change either model's
+        # session severity when loading is deferred until later.
+        _set_mlserver_level(logging.WARNING)
+        assert await first.load()
+        assert await second.load()
+        severities = [
+            call.kwargs["sess_options"].log_severity_level
+            for call in constructor.call_args_list
+        ]
+        assert severities == ([override, override] if override is not None else [0, 3])
 
 
 @pytest.mark.skipif(
