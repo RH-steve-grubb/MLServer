@@ -211,20 +211,40 @@ class SingleModelRegistry:
         )
 
         with model_context(model_settings):
-            # If a previous loaded model is found this is the trigger for reload
-            # Otherwise a fresh load is triggered
-            if previous_loaded_model:
-                new_model = await self._load_model(new_model, True)
-                # If this operation is being performed on a parallel worker,
-                # skip unload. The main process will dispatch an Unload message
-                # to all workers via InferencePool.unload_model, which triggers
-                # unload_version -> _unload_model on each worker.
-                if not parallel:
-                    await self._unload_model(previous_loaded_model, False)
-            else:
-                new_model = await self._load_model(new_model, False)
+            new_model = await self._load_model(
+                new_model, previous_loaded_model is not None
+            )
+            # Workers stage replacement publication until the main process
+            # dispatches the old generation's unload separately.
+            if not parallel:
+                await self._publish_model(new_model, previous_loaded_model)
 
         return new_model
+
+    async def _publish_model(self, model: MLModel, previous: MLModel | None) -> None:
+        # A hook can redirect preparation to another committed version. Both
+        # displaced instances stay owned, even if the first cleanup times out.
+        target = self._find_exact_version(model.version)
+        retired: list[MLModel] = []
+        for candidate in (previous, target):
+            if candidate is not None and candidate is not model:
+                if not any(candidate is owned for owned in retired):
+                    retired.append(candidate)
+
+        self._remove_pending(model)
+        self._unregister(model)
+        for old in retired:
+            self._unregister(old)
+            old.ready = False
+        self._refresh_default()
+        self._register(model)
+        cleanup = [self._start_cleanup(old) for old in retired]
+        results = await asyncio.gather(
+            *(asyncio.shield(task) for task in cleanup), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _load_model(self, model: MLModel, reload: bool = False):
         model_msg = f"model '{model.name}'"
@@ -233,8 +253,11 @@ class SingleModelRegistry:
             model_msg = f"version {model.version} of {model_msg}"
 
         preparation = None
+        initial_model = model
         hook_models = []
         try:
+            target = self._find_exact_version(model.version)
+            reload = reload or (target is not None and target is not model)
             if reload:
                 # For reload scenarios, the model should only be registered
                 # after it is successfully loaded to allow rollback
@@ -259,7 +282,14 @@ class SingleModelRegistry:
                 if reload:
                     self._pending_reload[version] = model
                 else:
-                    self._register(model)
+                    if model is not initial_model or (model.version or "") != version:
+                        self._unregister(initial_model)
+                        self._refresh_default()
+                    target = self._find_exact_version(model.version)
+                    if target is not None and target is not model:
+                        self._pending_reload[version] = model
+                    else:
+                        self._register(model)
 
             # Do not cancel runtime preparation: it may own native work or a
             # thread which asyncio cancellation cannot stop. An abandoned load
@@ -274,11 +304,11 @@ class SingleModelRegistry:
                 hooked._load_failed()
             logger.error(f"Failed to load {model_msg}. Attempting cleanup...")
             try:
+                self._discard_load(model)
+                cleanup = self._start_cleanup(model, preparation)
                 if isinstance(load_error, asyncio.CancelledError):
-                    self._discard_load(model)
-                    self._start_cleanup(model, preparation)
                     raise
-                await self._unload_model(model, reload, preparation)
+                await asyncio.shield(cleanup)
             except (Exception, asyncio.CancelledError) as cleanup_error:
                 if isinstance(load_error, asyncio.CancelledError):
                     # The timeout remains the primary outcome. Cleanup is owned
@@ -371,10 +401,18 @@ class SingleModelRegistry:
             model = await self.get_model(version)
         await self._unload_model(model, rollback)
 
+    def _remove_pending(self, model: MLModel) -> bool:
+        # A hook may return another version while the staged entry still has
+        # the original version key. Only this instance belongs to this cleanup.
+        removed = False
+        for version, pending in list(self._pending_reload.items()):
+            if pending is model:
+                del self._pending_reload[version]
+                removed = True
+        return removed
+
     def _discard_load(self, model: MLModel) -> None:
-        version = _get_version(model.settings) or ""
-        if self._pending_reload.get(version) is model:
-            del self._pending_reload[version]
+        self._remove_pending(model)
         self._unregister(model)
         model.ready = False
 
@@ -387,13 +425,14 @@ class SingleModelRegistry:
         version = _get_version(model.settings) or ""
         pending = self._pending_reload.get(version)
         if rollback:
-            if pending is not model:
+            if not self._remove_pending(model):
                 return
-            del self._pending_reload[version]
         elif pending is not None and pending is not model and pending.ready:
             # Publication precedes old-generation cleanup. A cleanup failure
             # must never roll back this successfully prepared replacement.
             del self._pending_reload[version]
+            self._unregister(model)
+            self._refresh_default()
             self._register(pending)
         else:
             self._unregister(model)
@@ -535,8 +574,11 @@ class SingleModelRegistry:
         self._refresh_default(model)
 
     def _unregister(self, model: MLModel):
-        if model.version and self._versions.get(model.version) is model:
-            del self._versions[model.version]
+        # Settings can have changed in a hook since this instance was keyed.
+        # Removing by its current version can strand an earlier registration.
+        for version, registered in list(self._versions.items()):
+            if registered is model:
+                del self._versions[version]
         if model is self._default:
             self._clear_default()
 

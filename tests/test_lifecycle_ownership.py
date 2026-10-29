@@ -355,3 +355,161 @@ async def test_version_unload_waits_for_abandoned_preparation(
         await asyncio.gather(attempt, return_exceptions=True)
         if healthy.name in registry._models:
             await registry.unload(healthy.name)
+
+
+@pytest.mark.parametrize("target_exists", [False, True], ids=["unused", "committed"])
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("wrap", [False, True])
+@pytest.mark.parametrize("outcome", ["error", "timeout", "success"])
+async def test_hook_version_change_keeps_instance_ownership(
+    sum_model_settings, monkeypatch, replacement, wrap, outcome, target_exists
+):
+    registry = MultiModelRegistry(model_operation_timeout=5)
+    healthy_settings = sum_model_settings.model_copy(deep=True)
+    healthy_settings.parameters.version = "3"
+    healthy = await registry.load(healthy_settings)
+    target = None
+    target_unloaded = asyncio.Event()
+    if target_exists:
+        target_settings = sum_model_settings.model_copy(deep=True)
+        target_settings.parameters.version = "2"
+        target = await registry.load(target_settings)
+
+        async def unload_target():
+            target_unloaded.set()
+            return True
+
+        monkeypatch.setattr(target, "unload", unload_target)
+    incoming = sum_model_settings.model_copy(deep=True)
+    incoming.parameters.version = "4"
+    old = await registry.load(incoming) if replacement else None
+    entered, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def hook(model):
+        if wrap:
+            model = SumModel(model.settings.model_copy(deep=True))
+        model.settings.parameters.version = "2"
+
+        async def load():
+            entered.set()
+            await release.wait()
+            return True
+
+        async def unload():
+            cleaned.set()
+            return True
+
+        monkeypatch.setattr(model, "load", load)
+        monkeypatch.setattr(model, "unload", unload)
+        return model
+
+    async def reject(model):
+        entered.set()
+        raise ValueError("hook rejected preparation")
+
+    registry._models[incoming.name]._on_model_load = (
+        [hook, reject] if outcome == "error" else [hook]
+    )
+    if outcome == "timeout":
+        registry._model_operation_timeout = 0.05
+    attempt = asyncio.create_task(registry.load(incoming.model_copy(deep=True)))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if outcome == "success":
+            release.set()
+            current = await asyncio.wait_for(attempt, 5)
+            assert await registry.get_model(incoming.name, "2") is current
+            assert current.ready
+            with pytest.raises(ModelNotFound):
+                await registry.get_model(incoming.name, "4")
+            assert await registry.get_model(incoming.name) is healthy
+            if target is not None:
+                assert not target.ready
+                assert target_unloaded.is_set()
+        else:
+            expected = ValueError if outcome == "error" else asyncio.TimeoutError
+            with pytest.raises(expected):
+                await asyncio.wait_for(asyncio.shield(attempt), 5)
+            release.set()
+            await asyncio.wait_for(cleaned.wait(), 5)
+            if target is None:
+                with pytest.raises(ModelNotFound):
+                    await registry.get_model(incoming.name, "2")
+            else:
+                assert await registry.get_model(incoming.name, "2") is target
+                assert target.ready
+                assert not target_unloaded.is_set()
+            if old is None:
+                with pytest.raises(ModelNotFound):
+                    await registry.get_model(incoming.name, "4")
+            else:
+                assert await registry.get_model(incoming.name, "4") is old
+                assert old.ready
+                assert old.version == "4"
+        assert await registry.get_model(incoming.name, "3") is healthy
+        assert healthy.ready
+    finally:
+        release.set()
+        await asyncio.gather(attempt, return_exceptions=True)
+        registry._model_operation_timeout = 5
+        await registry.unload(incoming.name)
+
+
+@pytest.mark.parametrize("outcome", ["error", "timeout"])
+async def test_redirected_commit_owns_both_displaced_instances(
+    sum_model_settings, monkeypatch, outcome
+):
+    registry = MultiModelRegistry(model_operation_timeout=5)
+    loaded = {}
+    for version in ("2", "3", "4"):
+        settings = sum_model_settings.model_copy(deep=True)
+        settings.parameters.version = version
+        loaded[version] = await registry.load(settings)
+    entered, release, original_cleaned = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+
+    async def cleanup_target():
+        entered.set()
+        if outcome == "error":
+            raise ValueError("target cleanup failed")
+        await release.wait()
+        return True
+
+    async def cleanup_original():
+        original_cleaned.set()
+        return True
+
+    async def redirect(model):
+        model.settings.parameters.version = "2"
+        return model
+
+    monkeypatch.setattr(loaded["2"], "unload", cleanup_target)
+    monkeypatch.setattr(loaded["4"], "unload", cleanup_original)
+    registry._models[sum_model_settings.name]._on_model_load = [redirect]
+    settings = sum_model_settings.model_copy(deep=True)
+    settings.parameters.version = "4"
+    registry._model_operation_timeout = 0.05 if outcome == "timeout" else 5
+    attempt = asyncio.create_task(registry.load(settings))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        expected = ValueError if outcome == "error" else asyncio.TimeoutError
+        with pytest.raises(expected):
+            await asyncio.wait_for(asyncio.shield(attempt), 5)
+        current = await registry.get_model(settings.name, "2")
+        assert current is not loaded["2"]
+        assert current.ready
+        assert await registry.get_model(settings.name) is loaded["3"]
+        assert not loaded["2"].ready
+        assert not loaded["4"].ready
+        await asyncio.wait_for(original_cleaned.wait(), 5)
+        with pytest.raises(ModelNotFound):
+            await registry.get_model(settings.name, "4")
+    finally:
+        release.set()
+        await asyncio.gather(attempt, return_exceptions=True)
+        registry._model_operation_timeout = 5
+        monkeypatch.setattr(loaded["2"], "unload", cleanup_original)
+        await registry.unload(settings.name)

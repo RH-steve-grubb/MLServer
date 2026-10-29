@@ -88,3 +88,12 @@ reports the uncertain state and keeps the owner rather than unloading concurrent
 SIGCHLD scheduling explicitly wakes the event loop. Scheduling a task from a raw
 Python signal handler alone can leave a standard asyncio selector asleep until
 unrelated IO or a timer, delaying worker exit handling and reconciliation.
+
+When a frontend hook substitutes a model or changes its version, registration and
+rollback follow instance identity. Earlier keys are removed, the previous committed
+instance survives precommit failure, and default selection includes healthy sibling
+versions. If preparation targets an already committed version, that target also
+survives precommit failure. Publication retires both displaced instances and gives
+each a cleanup owner before awaiting either; cleanup failure preserves publication.
+Hooks must finalize the worker-visible identity before worker preparation;
+renaming a worker model after dispatch is outside this ownership contract.
