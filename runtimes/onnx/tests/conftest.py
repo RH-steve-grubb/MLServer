@@ -2,6 +2,8 @@ import importlib
 import os
 import asyncio
 import socket
+from collections.abc import Generator
+from typing import Any
 import pytest
 import numpy as np
 import onnx
@@ -409,3 +411,33 @@ def pytest_configure(config):
         existing = os.environ.get("LD_LIBRARY_PATH", "")
         new = ":".join(paths)
         os.environ["LD_LIBRARY_PATH"] = f"{new}:{existing}" if existing else new
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--require-cuda",
+        action="store_true",
+        help="Require CUDA test coverage; missing or skipped CUDA tests fail the run.",
+    )
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    if session.config.getoption("--require-cuda") and not any(
+        item.get_closest_marker("cuda") for item in session.items
+    ):
+        raise pytest.UsageError("--require-cuda requires at least one CUDA test")
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item) -> Generator[None, Any, None]:
+    outcome = yield
+    report = outcome.get_result()
+    if (
+        item.config.getoption("--require-cuda")
+        and item.get_closest_marker("cuda")
+        and report.skipped
+    ):
+        # CPU-only suites retain automatic skips. A GPU validation job must
+        # expose missing hardware/libraries instead of passing without coverage.
+        report.outcome = "failed"
+        report.longrepr = f"{item.nodeid}: CUDA test skipped with --require-cuda"

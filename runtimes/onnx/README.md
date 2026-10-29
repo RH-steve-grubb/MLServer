@@ -373,6 +373,25 @@ latency, CPU use and GPU memory can change independently. Server-side request
 and transport settings are described in
 [Inference Performance Options](../../docs/user-guide/performance.md).
 
+#### Validating CUDA execution
+
+From the repository root, run the GPU validation suite serially:
+
+```bash
+poetry run tox -c runtimes/onnx -e cuda-ci
+```
+
+This environment installs the locked GPU dependencies and NVIDIA libraries with
+Poetry. It requires an NVIDIA driver compatible with CUDA 12. The launcher sets
+the native library search path before starting pytest. Real-device tests cover
+graph capture/replay, changed request contents, independent response buffers,
+and blocking synchronization, both separately and together.
+
+`cuda-ci` uses `--require-cuda`: missing CUDA coverage or skipped CUDA tests fail
+the run. The existing `cuda` environment retains automatic skips for CPU-only
+hosts. The `cuda-ci` command is ready for a GPU runner; it is not yet wired into
+the GitHub Actions workflow.
+
 ### Graph Optimization
 
 Enable graph optimizations to improve inference speed:
