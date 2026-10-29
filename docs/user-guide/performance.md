@@ -72,6 +72,23 @@ in the model settings for worker JSON processing. Batched models, models without
 parallel workers and other media types retain frontend preparation. Generate
 and streaming routes retain their existing behavior.
 
+Built-in inference success/failure counters and duration summaries remain owned
+by the frontend, so worker replacement does not discard completed requests.
+Labels use the model name and version supplied in the request URL; an
+unversioned request retains `version="None"`. Valid requests rejected during
+model lookup or readiness checking count as inference failures. Body/schema
+validation errors do not enter inference accounting.
+
+Duration includes model lookup, worker dispatch/wait and inference. As on the
+standard path, it excludes JSON parsing/validation and response JSON encoding.
+Workers report those conversion durations on success and error replies, and
+the frontend excludes them from its elapsed-time observation. HTTP body receipt
+and decompression also remain outside this metric.
+
+Success means inference completed, rather than HTTP response delivery succeeded.
+An error formatting that completed prediction retains the inference success,
+as on the standard path.
+
 ### ZeroMQ Inference Transport
 
 `parallel_inference_transport="zmq"` uses local ZeroMQ IPC sockets for inference

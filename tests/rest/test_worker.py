@@ -63,7 +63,7 @@ def worker_data_plane(
     metric_value_class: None,
     prometheus_registry: CollectorRegistry,
 ) -> DataPlane:
-    return DataPlane(settings, model_registry)
+    return DataPlane(settings, model_registry, inference_metrics=False)
 
 
 def request(body: bytes, headers: dict[str, str] | None = None) -> Request:
@@ -166,7 +166,7 @@ def test_json_content_types_keep_normal_input_schema(
     assert payload == inference_request
 
 
-async def test_worker_preserves_dataplane_context_headers_ids_outputs_and_metrics(
+async def test_worker_preserves_context_without_duplicating_frontend_metrics(
     worker_data_plane: DataPlane,
     sum_model: MLModel,
     inference_request: InferenceRequest,
@@ -189,8 +189,8 @@ async def test_worker_preserves_dataplane_context_headers_ids_outputs_and_metric
     success_counter = worker_data_plane._ModelInferRequestSuccess.labels(
         model=sum_model.name, version=sum_model.version
     )
-    # Registry cleanup does not reset multiprocess counter values. Seed prior
-    # successes so an assumed zero baseline fails regardless of test order.
+    # Workers retain middleware/context, but frontend-owned inference counters
+    # must not be incremented again by the worker's DataPlane.
     success_counter.inc(2)
     successes_before = success_counter._value.get()
     # Observe the real DataPlane before dispatch without registering another
@@ -214,10 +214,10 @@ async def test_worker_preserves_dataplane_context_headers_ids_outputs_and_metric
         assert value["outputs"][0]["data"] == [6.0]
         assert "headers" not in value.get("parameters", {})
     assert contexts == [(sum_model.name, sum_model.version)] * 2
-    factory.assert_called_once_with(settings, model_registry)
+    factory.assert_called_once_with(settings, model_registry, inference_metrics=False)
     plane = getattr(worker, "_rest_raw_data_plane")
     assert plane is worker_data_plane
-    assert success_counter._value.get() == successes_before + 2
+    assert success_counter._value.get() == successes_before
 
 
 async def test_worker_invalid_body_never_constructs_dataplane(
@@ -520,3 +520,62 @@ def test_raw_reply_survives_the_normal_worker_pickle_transport():
     assert restored.id == original.id
     assert restored.return_value == original.return_value
     assert isinstance(restored.return_value.body, bytes)
+
+
+async def test_worker_reports_json_conversion_time_in_pickled_reply(
+    worker_data_plane: DataPlane,
+    sum_model: MLModel,
+    inference_request: InferenceRequest,
+    mocker: MockerFixture,
+):
+    worker = cast(
+        Worker,
+        SimpleNamespace(
+            _settings=worker_data_plane._settings,
+            _model_registry=worker_data_plane._model_registry,
+        ),
+    )
+    mocker.patch.object(raw, "DataPlane", return_value=worker_data_plane)
+    mocker.patch.object(raw, "perf_counter", side_effect=[1.0, 3.0, 10.0, 13.0])
+    result = await raw.process_raw_request(
+        worker, message(inference_request.model_dump_json().encode(), sum_model)
+    )
+    restored = ForkingPickler.loads(ForkingPickler.dumps(result))
+    assert restored.exception is None
+    assert restored.return_value.conversion_duration == 5.0
+
+
+@pytest.mark.parametrize("phase", ["predict", "encode"])
+async def test_worker_reports_conversion_time_when_inference_or_encoding_fails(
+    phase: str,
+    worker_data_plane: DataPlane,
+    inference_request: InferenceRequest,
+    mocker: MockerFixture,
+):
+    model = await worker_data_plane._model_registry.get_model("sum-model")
+    worker = cast(
+        Worker,
+        SimpleNamespace(
+            _settings=worker_data_plane._settings,
+            _model_registry=worker_data_plane._model_registry,
+        ),
+    )
+    mocker.patch.object(raw, "DataPlane", return_value=worker_data_plane)
+    mocker.patch.object(raw, "perf_counter", side_effect=[1.0, 3.0, 10.0, 13.0])
+    if phase == "predict":
+        mocker.patch.object(model, "predict", side_effect=RuntimeError("model failed"))
+    else:
+        mocker.patch.object(
+            raw, "encode_response", side_effect=RuntimeError("encode failed")
+        )
+    result = await raw.process_raw_request(
+        worker, message(inference_request.model_dump_json().encode(), model)
+    )
+    restored = ForkingPickler.loads(ForkingPickler.dumps(result))
+    assert isinstance(restored.exception, WorkerError)
+    assert getattr(restored.exception, "_rest_conversion_duration") == (
+        2.0 if phase == "predict" else 5.0
+    )
+    assert getattr(restored.exception, "_rest_inference_succeeded") == (
+        phase == "encode"
+    )
