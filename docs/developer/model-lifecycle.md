@@ -84,3 +84,7 @@ Cancelling an owned local cleanup task also preserves its preparation reference.
 A retry joins preparation before releasing resources. If preparation itself is
 cancelled by external code, native completion cannot be established: cleanup
 reports the uncertain state and keeps the owner rather than unloading concurrently.
+
+SIGCHLD scheduling explicitly wakes the event loop. Scheduling a task from a raw
+Python signal handler alone can leave a standard asyncio selector asleep until
+unrelated IO or a timer, delaying worker exit handling and reconciliation.

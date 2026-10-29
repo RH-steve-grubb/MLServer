@@ -87,7 +87,16 @@ class InferencePoolRegistry:
 
         # Register sigchld signal handler (saving original to restore it later)
         self._original_sigchld_handler = signal.getsignal(signal.SIGCHLD)
-        signal.signal(signal.SIGCHLD, self._schedule_worker_stop)
+        loop = asyncio.get_running_loop()
+        signal.signal(
+            signal.SIGCHLD,
+            # A raw Python signal handler can run during selector polling.
+            # Wake the loop explicitly; scheduling a task alone can leave exit
+            # handling dormant until the next unrelated timer or IO event.
+            lambda signum, frame: loop.call_soon_threadsafe(
+                self._schedule_worker_stop, signum, frame
+            ),
+        )
 
     def _schedule_worker_stop(self, signum, frame) -> None:
         task = create_task_independent(self._handle_worker_stop(signum, frame))
