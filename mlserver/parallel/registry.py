@@ -5,7 +5,7 @@ import signal
 from collections.abc import Sequence
 
 from ..settings import ModelSettings
-from ..utils import to_absolute_path
+from ..utils import to_absolute_path, create_task_independent
 from ..model import MLModel
 from ..utils import defer_cancellation, with_operation_lock
 from weakref import WeakValueDictionary
@@ -83,7 +83,7 @@ class InferencePoolRegistry:
         self._original_sigchld_handler = signal.getsignal(signal.SIGCHLD)
         signal.signal(
             signal.SIGCHLD,
-            lambda *args: asyncio.create_task(self._handle_worker_stop(*args)),
+            lambda *args: create_task_independent(self._handle_worker_stop(*args)),
         )
 
     async def _handle_worker_stop(self, signum, frame):
@@ -345,11 +345,11 @@ class InferencePoolRegistry:
 
         try:
             loaded = await pool.load_model(model)
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             try:
                 await self._close_pool_if_empty(pool)
-            except Exception:
-                pass
+            except (Exception, asyncio.CancelledError):
+                logger.error("Failed to close pool after load failure", exc_info=True)
             raise
 
         _set_environment_hash(loaded, pool.env_hash)
@@ -379,8 +379,9 @@ class InferencePoolRegistry:
         finally:
             try:
                 await self._close_pool_if_empty(pool)
-            except Exception:
-                pass
+            except (Exception, asyncio.CancelledError):
+                logger.error("Failed to close empty pool", exc_info=True)
+                raise
 
         return unloaded
 

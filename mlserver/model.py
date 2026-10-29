@@ -111,6 +111,12 @@ class MLModel:
         """
         yield await self.predict((await payloads.__anext__()))
 
+    def _load_complete(self) -> None:
+        """Internal notification after all registry load hooks have succeeded."""
+
+    def _load_failed(self) -> None:
+        """Internal notification that registry preparation was abandoned."""
+
     async def unload(self) -> bool:
         """
         Method responsible for unloading the model, freeing any resources (e.g.

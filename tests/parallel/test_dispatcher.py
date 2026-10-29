@@ -341,3 +341,29 @@ async def test_stop_cleans_up_response_processing(responses, mocker):
     shutdown_executor.assert_called_once_with()
     with pytest.raises(NoWorkersAvailable):
         dispatcher._get_worker()
+
+
+async def test_late_response_cannot_resolve_newer_request(event_loop, load_message):
+    from mlserver.parallel.dispatcher import AsyncResponses
+
+    responses = AsyncResponses()
+    worker = cast(Worker, SimpleNamespace(pid=1234))
+    older = responses._schedule(load_message, worker)
+    newer_message = load_message.model_copy(update={"id": "newer-operation"})
+    newer = responses._schedule(newer_message, worker)
+    errors = []
+    original_handler = event_loop.get_exception_handler()
+    event_loop.set_exception_handler(lambda loop, context: errors.append(context))
+    try:
+        older.cancel()
+        responses.resolve(ModelResponseMessage(id=load_message.id))
+        await asyncio.sleep(0)
+        assert older.cancelled()
+        assert not newer.done()
+        responses.resolve(ModelResponseMessage(id=newer_message.id))
+        await asyncio.sleep(0)
+        assert newer.done()
+        assert not errors
+    finally:
+        newer.cancel()
+        event_loop.set_exception_handler(original_handler)

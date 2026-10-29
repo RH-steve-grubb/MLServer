@@ -20,10 +20,18 @@ class ModelMethods(Enum):
 class ParallelModel(MLModel):
     def __init__(self, model: MLModel, dispatcher: Dispatcher):
         super().__init__(model.settings)
+        self._on_load_complete: Callable[[], None] = lambda: None
+        self._on_load_failed: Callable[[], None] = lambda: None
         self._model = model
         self._dispatcher = dispatcher
         self._metadata: MetadataModelResponse | None = None
         self._add_custom_handlers()
+
+    def _load_complete(self) -> None:
+        self._on_load_complete()
+
+    def _load_failed(self) -> None:
+        self._on_load_failed()
 
     def _add_custom_handlers(self):
         custom_handlers = get_custom_handlers(self._model)

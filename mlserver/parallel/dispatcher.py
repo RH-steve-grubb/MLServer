@@ -111,7 +111,7 @@ class AsyncResponses:
         """
         message_id = response.id
         future = self._futures.get(message_id)
-        if future is None:
+        if future is None or future.done():
             # Future already cancelled and cleared (e.g. worker crashed after
             # sending its response) — nothing left to resolve
             return

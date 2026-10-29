@@ -296,6 +296,7 @@ async def test_start_worker_waits_for_load_lock(
     worker.stop = stop_worker
     worker.join = lambda _timeout: None
     worker.exitcode = 0
+    worker.close_queues = lambda: None
 
     async def controlled_dispatch(_message):
         dispatch_started.set()
@@ -454,6 +455,7 @@ async def test_start_worker_cancellation_settles_startup(
     worker.stop = stop_worker
     worker.join = lambda _timeout: None
     worker.exitcode = 0
+    worker.close_queues = lambda: None
 
     async def controlled_replay(_worker):
         replay_started.set()
@@ -480,6 +482,7 @@ async def test_start_worker_replay_failure_kills_replacement(
     worker = SimpleNamespace(pid=987654)
     worker.kill = mocker.Mock()
     worker.exitcode = 0
+    worker.close_queues = lambda: None
 
     async def stop_worker():
         return None
@@ -604,7 +607,7 @@ async def test_failed_reload_preserves_committed_model_for_rollback(
     dispatch = mocker.patch.object(
         inference_pool._dispatcher,
         "dispatch_update",
-        side_effect=RuntimeError("replacement load failed"),
+        side_effect=[RuntimeError("replacement load failed"), []],
     )
 
     with pytest.raises(RuntimeError, match="replacement load failed"):
@@ -612,7 +615,7 @@ async def test_failed_reload_preserves_committed_model_for_rollback(
 
     model_key = inference_pool._model_key(replacement.settings)
     assert inference_pool.has_model(sum_model.settings)
-    assert inference_pool._pending_reload[model_key] is replacement
+    assert model_key not in inference_pool._pending_reload
 
     dispatch.side_effect = None
     dispatch.return_value = []

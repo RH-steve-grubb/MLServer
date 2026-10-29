@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextvars import ContextVar
 
 from collections.abc import Awaitable, Callable, Sequence
 from itertools import chain
@@ -8,13 +9,17 @@ from prometheus_client import Counter
 
 from .context import model_context
 from .model import MLModel
-from .utils import defer_cancellation, with_operation_lock
+from .utils import defer_cancellation, with_operation_lock, create_task_independent
 from weakref import WeakValueDictionary
 from .errors import ModelNotFound
 from .logging import logger
 from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .metrics.context import MODEL_NAME_LABEL, MODEL_VERSION_LABEL
 from mlserver.errors import ModelLoadError, ModelUnloadError
+
+_model_load_hooks_active: ContextVar[bool] = ContextVar(
+    "model_load_hooks_active", default=False
+)
 
 ModelInitialiser = Callable[[ModelSettings], MLModel]
 ModelRegistryHook = Callable[[MLModel], Awaitable[MLModel]]
@@ -228,6 +233,7 @@ class SingleModelRegistry:
             model_msg = f"version {model.version} of {model_msg}"
 
         preparation = None
+        hook_models = []
         try:
             if reload:
                 # For reload scenarios, the model should only be registered
@@ -242,7 +248,12 @@ class SingleModelRegistry:
                 for callback in self._on_model_load:
                     # NOTE: Callbacks need to be executed sequentially to ensure that
                     # they go in the right order
-                    model = await callback(model)
+                    token = _model_load_hooks_active.set(True)
+                    try:
+                        model = await callback(model)
+                        hook_models.append(model)
+                    finally:
+                        _model_load_hooks_active.reset(token)
             finally:
                 # Register model again to ensure we save version modified by hooks
                 if reload:
@@ -256,7 +267,11 @@ class SingleModelRegistry:
             preparation = asyncio.create_task(model.load())
             if not await asyncio.shield(preparation):
                 raise ModelLoadError(f"Model load returned False for {model_msg}.")
+            for hooked in hook_models:
+                hooked._load_complete()
         except (Exception, asyncio.CancelledError) as load_error:
+            for hooked in hook_models:
+                hooked._load_failed()
             logger.error(f"Failed to load {model_msg}. Attempting cleanup...")
             try:
                 if isinstance(load_error, asyncio.CancelledError):
@@ -395,7 +410,7 @@ class SingleModelRegistry:
             if preparation is not None:
                 self._cleanup_preparations[model] = preparation
             preparation = self._cleanup_preparations.get(model)
-            task = asyncio.create_task(self._cleanup_model(model, preparation))
+            task = create_task_independent(self._cleanup_model(model, preparation))
             self._cleanup_tasks[model] = task
             task.add_done_callback(lambda done: self._cleanup_done(model, done))
         return task

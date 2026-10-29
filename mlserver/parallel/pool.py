@@ -2,6 +2,7 @@ import asyncio
 import random
 
 from contextlib import nullcontext
+from weakref import WeakSet
 from multiprocessing import Queue
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,7 +10,8 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from prometheus_client import Counter
 
 from ..model import MLModel
-from ..utils import defer_cancellation, with_operation_lock
+from ..registry import _model_load_hooks_active
+from ..utils import defer_cancellation, with_operation_lock, create_task_independent
 from ..types import InferenceRequest, InferenceResponse
 from ..settings import Settings, ModelSettings
 from ..env import Environment
@@ -59,7 +61,7 @@ class WorkerRegistry:
 
     def add(self, model_settings: ModelSettings):
         model_key = self._key(model_settings)
-        self._models[model_key] = model_settings
+        self._models[model_key] = model_settings.model_copy(deep=True)
 
     def remove(self, model_settings: ModelSettings):
         model_key = self._key(model_settings)
@@ -126,6 +128,12 @@ class InferencePool:
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False
+        self._closing_workers: dict[int, Worker] = {}
+        self._restart_tasks: set[asyncio.Task] = set()
+        self._recovery_task: asyncio.Task | None = None
+        self._staged: dict[ParallelModel, asyncio.Future] = {}
+        self._quarantined_workers: dict[int, Worker] = {}
+        self._retired_models: WeakSet[MLModel] = WeakSet()
         self._operation_lock = asyncio.Lock()
         self._settings = settings
         self._responses: Queue[ModelResponseMessage] = Queue()
@@ -203,7 +211,7 @@ class InferencePool:
                 *[callback(worker) for callback in self._on_worker_stop],
                 return_exceptions=True,
             )
-            failures = [r for r in results if isinstance(r, Exception)]
+            failures = [r for r in results if isinstance(r, BaseException)]
             if failures:
                 # Track cleanup failures
                 self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
@@ -217,13 +225,12 @@ class InferencePool:
             # up the parent-side queue resources before discarding the worker.
             worker.close_queues()
 
-            # create_task is intentional: allows the SIGCHLD handler to process
-            # all crashed PIDs immediately rather than blocking on each
-            # replacement's replay. The task is kept alive by the event loop's
-            # execution machinery (Handle → lock waiter → gather futures)
-            # throughout its lifetime — no GC risk.
+            # Restart independently of the signal handler and its inherited
+            # timeout context. Keep each owner until its result is observed.
             if not self._closing:
-                asyncio.create_task(self._safe_start_worker())  # noqa: RUF006
+                task = create_task_independent(self._safe_start_worker())
+                self._restart_tasks.add(task)
+                task.add_done_callback(self._restart_tasks.discard)
 
     async def _safe_start_worker(self):
         """
@@ -249,6 +256,11 @@ class InferencePool:
         # Do not start a worker if the pool is closing
         if self._closing:
             return None
+        if self._staged:
+            await asyncio.gather(*[asyncio.shield(f) for f in self._staged.values()])
+        await self._settle_recovery()
+        if self._closing:
+            return None
         worker = _spawn_worker(
             self._settings,
             self._responses,
@@ -267,7 +279,18 @@ class InferencePool:
             # Replay can fail through an operation error, timeout, or
             # cancellation. In every case the replacement worker is not safe
             # to publish as ready.
+            self._dispatcher.on_worker_stop(worker, -1)
+            assert worker.pid is not None
+            self._closing_workers[worker.pid] = worker
             worker.kill()
+            await asyncio.to_thread(
+                worker.join, self._settings.parallel_workers_timeout
+            )
+            if worker.exitcode is None:
+                logger.error(f"Replay worker {worker.pid} has not confirmed exit")
+            else:
+                worker.close_queues()
+                self._closing_workers.pop(worker.pid, None)
             raise
 
         if not self._closing:
@@ -304,7 +327,7 @@ class InferencePool:
             ],
             return_exceptions=True,
         )
-        load_failures = [r for r in load_results if isinstance(r, Exception)]
+        load_failures = [r for r in load_results if isinstance(r, BaseException)]
         if load_failures:
             raise load_failures[0]
 
@@ -323,7 +346,7 @@ class InferencePool:
             ],
             return_exceptions=True,
         )
-        reload_failures = [r for r in reload_results if isinstance(r, Exception)]
+        reload_failures = [r for r in reload_results if isinstance(r, BaseException)]
         if reload_failures:
             raise reload_failures[0]
 
@@ -337,39 +360,63 @@ class InferencePool:
     async def load_model(self, model: MLModel) -> MLModel:
         if self._closing:
             raise InferencePoolUnavailable(self.name)
-        # Check for reload
+        await self._settle_recovery()
         reload = self.has_model(model.settings)
-
-        # Register the model prior to dispatch
-        # This allows for rollback for load failure or worker crash
-        if reload:
-            self._pending_reload[self._model_key(model.settings)] = model
-        else:
-            self._worker_registry.add(model.settings)
-
+        # Replay only committed fresh loads. Reloads are staged only after
+        # every live worker acknowledges preparation.
         try:
             load_message = ModelUpdateMessage(
                 update_type=ModelUpdateType.Load,
                 model_settings=model.settings,  # type: ignore
+                rollback=reload,
             )
-            await self._dispatcher.dispatch_update(load_message)
-        except Exception:
-            # If load fails, only unregister for fresh load
-            if not reload:
-                self._worker_registry.remove(model.settings)
+            await self._dispatch_owned(load_message)
+        except (Exception, asyncio.CancelledError):
+            self._retire(model)
             raise
-
-        # Wrap the model in the ParallelModel class so that the main process
-        # does not load/unload the model (only done on workers)
-        if isinstance(model, ParallelModel):
-            return model
-
-        parallel_model = ParallelModel(model, self._dispatcher)
-        if reload:
-            # Ensure the model tracked in pending reload list is the same
-            # as the returned instance
-            self._pending_reload[self._model_key(model.settings)] = parallel_model
+        if self._closing:
+            self._retire(model)
+            raise InferencePoolUnavailable(self.name)
+        self._retired_models.discard(model)
+        parallel_model = self._wrap(model)
+        if _model_load_hooks_active.get():
+            # The pool hook is preparation, not frontend publication. Replay
+            # waits for the registry to finish every subsequent hook as well.
+            self._staged[parallel_model] = asyncio.get_running_loop().create_future()
+            parallel_model._on_load_complete = lambda: self._commit_model(
+                parallel_model, reload
+            )
+            parallel_model._on_load_failed = lambda: self._abandon_model(
+                parallel_model, load_message
+            )
+        else:
+            self._commit_model(parallel_model, reload)
         return parallel_model
+
+    def _release_stage(self, model: ParallelModel) -> None:
+        future = self._staged.pop(model, None)
+        if future is not None and not future.done():
+            future.set_result(None)
+
+    def _commit_model(self, model: ParallelModel, reload: bool) -> None:
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
+        if reload:
+            self._pending_reload[self._model_key(model.settings)] = model
+            if model in self._staged:
+                model.ready = True
+        else:
+            self._worker_registry.add(model.settings)
+        self._release_stage(model)
+
+    def _abandon_model(self, model: ParallelModel, message: ModelUpdateMessage) -> None:
+        if model not in self._staged:
+            return
+        self._retire(model)
+        dispatch = asyncio.get_running_loop().create_future()
+        dispatch.set_result(None)
+        self._begin_recovery(dispatch, message)
+        self._release_stage(model)
 
     @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
     @defer_cancellation(
@@ -378,39 +425,118 @@ class InferencePool:
     async def unload_model(self, model: MLModel) -> MLModel:
         if self._closing:
             raise InferencePoolUnavailable(self.name)
-        # Unregister any pending reloads - unload overrides them
-        pending_model = self._pending_reload.pop(self._model_key(model.settings), None)
-
-        # Check rollback
-        rollback = False
-        if pending_model:
-            if pending_model.ready:
-                # If a pending model exists with ready status, this indicates
-                # successful reload load, so we register the new model and
-                # unload the old model
-                self._worker_registry.add(pending_model.settings)
-            else:
-                # If a pending model exists with not ready status, this indicates
-                # failed reload load, so we keep the old model registered and
-                # perform rollback on the new model
-                rollback = True
-        else:
-            # If there is no pending model then this indicates non-reload
-            # Unregister and unload the model
+        await self._settle_recovery()
+        if model in self._retired_models:
+            return self._wrap(model)
+        key = self._model_key(model.settings)
+        pending_model = self._pending_reload.pop(key, None)
+        rollback = pending_model is not None and not pending_model.ready
+        if pending_model is not None and not rollback:
+            # This is the publication point for replay. A later failure while
+            # releasing the old instance must preserve the new settings.
+            self._worker_registry.add(pending_model.settings)
+        elif pending_model is None:
             self._worker_registry.remove(model.settings)
-
+        self._retire(model)
         unload_message = ModelUpdateMessage(
             update_type=ModelUpdateType.Unload,
             model_settings=model.settings,  # type: ignore
             rollback=rollback,
         )
-        await self._dispatcher.dispatch_update(unload_message)
+        await self._dispatch_owned(unload_message)
 
         # Wrap the model in the ParallelModel class so that the main process
         # does not load/unload the model (only done on workers)
         if isinstance(model, ParallelModel):
             return model
         return ParallelModel(model, self._dispatcher)
+
+    def _wrap(self, model: MLModel) -> ParallelModel:
+        return (
+            model
+            if isinstance(model, ParallelModel)
+            else ParallelModel(model, self._dispatcher)
+        )
+
+    def _retire(self, model: MLModel) -> None:
+        self._retired_models.add(model)
+        if isinstance(model, ParallelModel):
+            self._retired_models.add(model._model)
+
+    async def _settle_recovery(self) -> None:
+        while self._recovery_task is not None:
+            task = self._recovery_task
+            await asyncio.shield(task)
+            if self._recovery_task is task:
+                self._recovery_task = None
+
+    async def _dispatch_owned(self, message: ModelUpdateMessage) -> None:
+        # A frontend deadline cannot cancel an update already delivered to an
+        # independent process. Keep the response waiter until it settles.
+        dispatch = asyncio.create_task(self._dispatcher.dispatch_update(message))
+        try:
+            await asyncio.shield(dispatch)
+        except (Exception, asyncio.CancelledError):
+            self._begin_recovery(dispatch, message)
+            raise
+
+    def _begin_recovery(
+        self, dispatch: asyncio.Future, message: ModelUpdateMessage
+    ) -> None:
+        self._quarantined_workers.update(self._dispatcher._ready_workers)
+        self._dispatcher._ready_workers.clear()
+        self._dispatcher._reset_round_robin()
+        previous = self._recovery_task
+
+        async def recover():
+            if previous is not None:
+                await previous
+            await self._recover_update(dispatch, message)
+
+        self._recovery_task = create_task_independent(recover())
+        self._recovery_task.add_done_callback(self._recovery_done)
+
+    def _recovery_done(self, task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is not None:
+            logger.error(
+                f"Recovery of {self.name} failed; pool remains quarantined "
+                "and owned until close.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
+
+    async def _recover_update(
+        self,
+        dispatch: asyncio.Future,
+        message: ModelUpdateMessage,
+    ) -> None:
+        failed = None
+        try:
+            await dispatch
+        except (Exception, asyncio.CancelledError) as error:
+            failed = error
+        if self._closing:
+            return
+        if message.update_type == ModelUpdateType.Load:
+            # Settlement alone is insufficient: partial success may have left
+            # staged instances on some workers. Restore the old committed state
+            # with acknowledged cleanup before allowing any routing or replay.
+            await self._dispatcher.dispatch_update(
+                ModelUpdateMessage(
+                    update_type=ModelUpdateType.Unload,
+                    model_settings=message.model_settings,  # type: ignore
+                    rollback=message.rollback,
+                )
+            )
+        elif failed is not None:
+            # An unacknowledged unload is unsafe to replay by name: a second
+            # unload could remove the replacement which the first committed.
+            # Preserve ownership and the failure instead of guessing state.
+            raise failed
+        if not self._closing and asyncio.current_task() is self._recovery_task:
+            for pid, worker in self._quarantined_workers.items():
+                if pid in self._workers:
+                    self._dispatcher.on_worker_ready(worker)
+            self._quarantined_workers.clear()
 
     def has_model(self, model_settings: ModelSettings) -> bool:
         return self._worker_registry.has_model(model_settings)
