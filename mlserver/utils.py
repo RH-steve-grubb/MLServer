@@ -3,7 +3,7 @@ import uuid
 import asyncio
 import inspect
 import urllib.parse
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 
 from asyncio import Task
 from collections.abc import Awaitable, Callable, Coroutine
@@ -194,6 +194,17 @@ async def _defer_cancellation(
                     caller.uncancel()
             continue
     return task.result()
+
+
+def create_task_independent(operation: Coroutine[Any, Any, T]) -> Task[T]:
+    """Spawn owned background work with its own lifecycle timeout boundary.
+
+    Other context (logging, tracing, etc.) is preserved. The caller must keep
+    the task and observe its result. Awaited nested calls still share deadlines.
+    """
+    context = copy_context()
+    context.run(_deferred_cancellation_active.set, False)
+    return context.run(asyncio.create_task, operation)
 
 
 def defer_cancellation(

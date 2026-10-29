@@ -521,3 +521,29 @@ async def test_deferred_timeout_starts_after_lock_acquisition():
         await task
 
     assert not lock.locked()
+
+
+async def test_owned_background_operation_has_independent_deadline():
+    from mlserver.utils import create_task_independent
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    @defer_cancellation(timeout=0.02)
+    async def background():
+        entered.set()
+        await release.wait()
+
+    @defer_cancellation(timeout=5)
+    async def launch():
+        task = create_task_independent(background())
+        await entered.wait()
+        return task
+
+    task = await launch()
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), 5)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
