@@ -37,6 +37,8 @@ class ModelNotReady(MLServerError):
 class ModelLoadError(MLServerError):
     """Raised when model loading or validation fails (e.g. invalid artifact)."""
 
+    cleanup_error: BaseException | None = None
+
     def __init__(self, msg: str):
         super().__init__(msg, status.HTTP_422_UNPROCESSABLE_ENTITY)
 

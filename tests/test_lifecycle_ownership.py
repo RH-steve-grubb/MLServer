@@ -1,0 +1,357 @@
+"""Lifecycle regressions use existing trusted runtimes and controlled barriers."""
+
+import asyncio
+
+import pytest
+
+from mlserver.errors import ModelLoadError, ModelNotFound
+from mlserver.registry import MultiModelRegistry
+from tests.fixtures import SumModel
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+@pytest.mark.parametrize("stage", ["load", "hook", "wrapped-hook"])
+async def test_abandoned_load_never_publishes(
+    sum_model_settings, monkeypatch, replacement, stage
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cleaned = asyncio.Event()
+    models = []
+    registry = MultiModelRegistry(model_operation_timeout=0.05)
+    old = await registry.load(sum_model_settings) if replacement else None
+
+    def initialise(settings):
+        model = SumModel(settings)
+        models.append(model)
+
+        async def load():
+            entered.set()
+            await release.wait()
+            return True
+
+        async def unload():
+            cleaned.set()
+            return True
+
+        monkeypatch.setattr(model, "unload", unload)
+        if stage == "load":
+            monkeypatch.setattr(model, "load", load)
+        return model
+
+    async def hook(model):
+        if stage == "wrapped-hook":
+            model = initialise(model.settings)
+        return model
+
+    async def paused_hook(model):
+        entered.set()
+        await release.wait()
+        return model
+
+    registry._model_initialiser = initialise
+    registry._on_model_load = [hook, paused_hook] if stage != "load" else []
+    if old is not None:
+        single = registry._models[old.name]
+        single._model_initialiser = initialise
+        single._on_model_load = registry._on_model_load
+
+    attempt = asyncio.create_task(registry.load(sum_model_settings))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(attempt), 5)
+        if old is not None:
+            assert await registry.get_model(old.name, old.version) is old
+            assert old.ready
+        else:
+            with pytest.raises(ModelNotFound):
+                await registry.get_model(sum_model_settings.name)
+        # Native preparation may still be running. Its retained owner must
+        # finish it before cleanup, and prevent a conflicting retry.
+        release.set()
+        await asyncio.wait_for(cleaned.wait(), 5)
+        if old is not None:
+            await registry.unload_version(old.name, old.version)
+        assert await registry.get_models() == []
+        registry._on_model_load = []
+        if sum_model_settings.name in registry._models:
+            registry._models[sum_model_settings.name]._on_model_load = []
+        retry = await registry.load(sum_model_settings)
+        assert retry.ready
+        assert await registry.get_model(retry.name, retry.version) is retry
+    finally:
+        release.set()
+        await asyncio.gather(attempt, return_exceptions=True)
+        if sum_model_settings.name in registry._models:
+            await registry.unload(sum_model_settings.name)
+
+
+async def test_failed_load_cleanup_remains_owned(sum_model_settings, monkeypatch):
+    registry = MultiModelRegistry()
+    model = SumModel(sum_model_settings)
+    primary = ValueError("preparation failed")
+    cleanup = RuntimeError("resource still live")
+
+    async def load():
+        raise primary
+
+    async def unload():
+        raise cleanup
+
+    monkeypatch.setattr(model, "load", load)
+    monkeypatch.setattr(model, "unload", unload)
+    registry._model_initialiser = lambda _: model
+    with pytest.raises(ModelLoadError) as failure:
+        await registry.load(sum_model_settings)
+    assert failure.value.__cause__ is primary
+    assert failure.value.cleanup_error is cleanup
+    assert await registry.get_models() == []
+    assert sum_model_settings.name in registry._models
+    with pytest.raises(RuntimeError, match="resource still live"):
+        await registry.load(sum_model_settings)
+    monkeypatch.setattr(model, "unload", SumModel.unload.__get__(model))
+    await registry.unload(sum_model_settings.name)
+
+
+async def test_unload_timeout_retains_cleanup(sum_model_settings, monkeypatch):
+    registry = MultiModelRegistry(model_operation_timeout=0.05)
+    model = await registry.load(sum_model_settings)
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def unload():
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(model, "unload", unload)
+    operation = asyncio.create_task(registry.unload(model.name))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(operation), 5)
+        assert await registry.get_models() == []
+        assert model.name in registry._models
+        repeated = asyncio.create_task(registry.unload(model.name))
+        release.set()
+        await asyncio.wait_for(repeated, 5)
+        assert calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(operation, return_exceptions=True)
+
+
+async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeypatch):
+    registry = MultiModelRegistry(model_operation_timeout=0.05)
+    entered, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    abandoned = SumModel(sum_model_settings)
+
+    async def load():
+        entered.set()
+        await release.wait()
+        return True
+
+    async def unload():
+        cleaned.set()
+        return True
+
+    monkeypatch.setattr(abandoned, "load", load)
+    monkeypatch.setattr(abandoned, "unload", unload)
+    registry._model_initialiser = lambda _: abandoned
+    attempt = asyncio.create_task(registry.load(sum_model_settings))
+    retry = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(attempt), 5)
+        registry._model_operation_timeout = 5
+        registry._models[abandoned.name]._model_initialiser = SumModel
+        retry = asyncio.create_task(registry.load(sum_model_settings))
+        await asyncio.sleep(0)
+        assert not retry.done()
+        release.set()
+        current = await asyncio.wait_for(retry, 5)
+        assert cleaned.is_set()
+        assert current is not abandoned
+        assert current.ready
+        assert await registry.get_model(current.name, current.version) is current
+    finally:
+        release.set()
+        await asyncio.gather(
+            attempt, *([retry] if retry else []), return_exceptions=True
+        )
+        await registry.unload(sum_model_settings.name)
+
+
+async def test_postcommit_cleanup_failure_keeps_replacement(
+    sum_model_settings, monkeypatch
+):
+    registry = MultiModelRegistry()
+    old = await registry.load(sum_model_settings)
+
+    async def fail():
+        raise RuntimeError("old resources retained")
+
+    monkeypatch.setattr(old, "unload", fail)
+    with pytest.raises(RuntimeError, match="old resources retained"):
+        await registry.load(sum_model_settings)
+    current = await registry.get_model(old.name, old.version)
+    assert current is not old
+    assert current.ready
+    monkeypatch.setattr(old, "unload", SumModel.unload.__get__(old))
+    await registry.unload(old.name)
+
+
+async def test_failed_replacement_cannot_mutate_committed_settings(
+    sum_model_settings,
+):
+    registry = MultiModelRegistry()
+    old = await registry.load(sum_model_settings)
+    original = old.settings.model_dump()
+
+    async def failing_hook(model):
+        model.settings.platform = "uncommitted-platform"
+        raise ValueError("hook failed")
+
+    registry._models[old.name]._on_model_load = [failing_hook]
+    with pytest.raises(ValueError, match="hook failed"):
+        await registry.load(old.settings)
+    assert old.settings.model_dump() == original
+    assert await registry.get_model(old.name, old.version) is old
+    await registry.unload(old.name)
+
+
+async def test_failure_preserves_unrelated_names_versions_and_default(
+    sum_model_settings, monkeypatch
+):
+    registry = MultiModelRegistry(model_operation_timeout=0.05)
+    versions = []
+    for version in ["1", "2", None]:
+        settings = sum_model_settings.model_copy(deep=True)
+        settings.parameters.version = version
+        versions.append(await registry.load(settings))
+    other = sum_model_settings.model_copy(deep=True)
+    other.name = "other-name"
+    other_model = await registry.load(other)
+    failed = SumModel(versions[0].settings.model_copy(deep=True))
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def load():
+        entered.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(failed, "load", load)
+    registry._models[failed.name]._model_initialiser = lambda _: failed
+    operation = asyncio.create_task(registry.load(failed.settings))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(operation), 5)
+        for model in versions[:2]:
+            assert await registry.get_model(model.name, model.version) is model
+            assert model.ready
+        assert await registry.get_model(failed.name) is versions[-1]
+        assert await registry.get_model(other.name) is other_model
+    finally:
+        release.set()
+        await asyncio.gather(operation, return_exceptions=True)
+        await registry.unload(failed.name)
+        await registry.unload(other.name)
+
+
+async def test_interrupted_cleanup_does_not_cancel_native_preparation(
+    sum_model_settings, monkeypatch
+):
+    import threading
+
+    registry = MultiModelRegistry(model_operation_timeout=0.05)
+    entered, release = asyncio.Event(), threading.Event()
+    finished = threading.Event()
+    unloaded = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    model = SumModel(sum_model_settings)
+
+    def native_prepare():
+        loop.call_soon_threadsafe(entered.set)
+        release.wait()
+        finished.set()
+
+    async def load():
+        await asyncio.to_thread(native_prepare)
+        return True
+
+    async def unload():
+        assert finished.is_set()
+        unloaded.set()
+        return True
+
+    monkeypatch.setattr(model, "load", load)
+    monkeypatch.setattr(model, "unload", unload)
+    registry._model_initialiser = lambda _: model
+    attempt = asyncio.create_task(registry.load(sum_model_settings))
+    retry = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(attempt), 5)
+        cleanup = registry._models[model.name]._cleanup_tasks[model]
+        cleanup.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup
+        assert not unloaded.is_set()
+        registry._model_operation_timeout = 5
+        retry = asyncio.create_task(registry.unload(model.name))
+        await asyncio.sleep(0)
+        assert not retry.done()
+        release.set()
+        await asyncio.wait_for(retry, 5)
+        assert unloaded.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(
+            attempt, *([retry] if retry else []), return_exceptions=True
+        )
+        await asyncio.wait_for(asyncio.to_thread(finished.wait), 5)
+
+
+async def test_version_unload_waits_for_abandoned_preparation(
+    sum_model_settings, monkeypatch
+):
+    registry = MultiModelRegistry(model_operation_timeout=0.05)
+    healthy_settings = sum_model_settings.model_copy(deep=True)
+    healthy_settings.parameters.version = "2"
+    healthy = await registry.load(healthy_settings)
+    entered, release = asyncio.Event(), asyncio.Event()
+    failed_settings = sum_model_settings.model_copy(deep=True)
+    failed_settings.parameters.version = "1"
+    partial = SumModel(failed_settings)
+
+    async def load():
+        entered.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(partial, "load", load)
+    registry._models[healthy.name]._model_initialiser = lambda _: partial
+    attempt = asyncio.create_task(registry.load(failed_settings))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(attempt), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await registry.unload_version(healthy.name, "2")
+        assert await registry.get_model(healthy.name, "2") is healthy
+        assert healthy.ready
+        release.set()
+        registry._model_operation_timeout = 5
+        await registry.unload_version(healthy.name, "2")
+        assert await registry.get_models() == []
+    finally:
+        release.set()
+        await asyncio.gather(attempt, return_exceptions=True)
+        if healthy.name in registry._models:
+            await registry.unload(healthy.name)
