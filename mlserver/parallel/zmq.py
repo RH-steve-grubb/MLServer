@@ -6,6 +6,7 @@ created in their owning process; model control messages keep their queues.
 
 import asyncio
 from collections.abc import Callable
+from functools import partial
 from multiprocessing.reduction import ForkingPickler
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import zmq
 import zmq.asyncio
 
 from .logging import logger
+from .errors import WorkerStop
 from .messages import ModelRequestMessage, ModelResponseMessage
 from .worker import Worker
 
@@ -53,6 +55,7 @@ class ParentTransport:
         self._context = zmq.asyncio.Context(io_threads=1)
         self._replies: Any = None
         self._requests: dict[int, Any] = {}
+        self._pending_sends: dict[int, set[asyncio.Future[None]]] = {}
         self._receiver: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._failure: BaseException | None = None
@@ -147,10 +150,48 @@ class ParentTransport:
             self._requests[pid] = sock
         # Use multiprocessing.Queue's exact default serializer/protocol,
         # including the existing Pydantic and NumPy pickle reducers.
-        await self._requests[pid].send(ForkingPickler.dumps(message), copy=True)
+        sending = self._requests[pid].send(ForkingPickler.dumps(message), copy=True)
+        if sending.done():
+            sending.result()
+            return
+        # A socket close cancels PyZMQ's send Future. Keep a distinct waiter so
+        # worker/transport failure cannot masquerade as caller cancellation.
+        # Ready sends keep the original direct path without an extra Future.
+        completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        pending = self._pending_sends.setdefault(pid, set())
+        pending.add(completed)
+        sending.add_done_callback(partial(self._complete_send, completed))
+        try:
+            await completed
+        finally:
+            pending.discard(completed)
+            if not pending:
+                self._pending_sends.pop(pid, None)
+            if not sending.done():
+                sending.cancel()
+            # Explicit task cancellation may win after worker failure has set
+            # an exception but before the waiter resumes. Consume that stored
+            # exception without changing the caller's cancellation outcome.
+            if completed.done() and not completed.cancelled():
+                completed.exception()
 
-    def forget_worker(self, pid: int) -> None:
+    def _complete_send(self, completed: asyncio.Future[None], sending: Any) -> None:
+        if sending.cancelled():
+            error = self._failure or RuntimeError("ZeroMQ inference send was stopped")
+        else:
+            error = sending.exception()
+        if completed.done():
+            return
+        if error is not None:
+            completed.set_exception(error)
+        else:
+            completed.set_result(None)
+
+    def forget_worker(self, pid: int, exit_code: int = -1) -> None:
         """Release the request socket when its worker leaves the pool."""
+        for completed in self._pending_sends.get(pid, ()):
+            if not completed.done():
+                completed.set_exception(WorkerStop(exit_code))
         sock = self._requests.pop(pid, None)
         if sock is not None:
             sock.close()

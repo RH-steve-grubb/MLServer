@@ -221,7 +221,7 @@ class Dispatcher:
 
         self._reset_round_robin()
         if self._transport is not None and pid is not None:
-            self._transport.forget_worker(pid)
+            self._transport.forget_worker(pid, exit_code)
         self._async_responses.cancel(worker, exit_code)
 
     def start(self):
