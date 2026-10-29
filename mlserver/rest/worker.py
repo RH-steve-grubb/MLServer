@@ -13,6 +13,7 @@ import json
 import os
 from typing import Any, TYPE_CHECKING
 
+from fastapi import HTTPException
 from fastapi.encoders import jsonable_encoder
 from pydantic import TypeAdapter, ValidationError
 from starlette.requests import Request
@@ -158,7 +159,17 @@ class RawEndpoints:
         from ..parallel.messages import ModelRequestMessage
         from ..parallel.model import ParallelModel
 
-        body, headers = await request.body(), dict(request.headers)
+        try:
+            body = await request.body()
+        except HTTPException:
+            raise
+        except Exception as error:
+            # A Request-only endpoint bypasses FastAPI's body parser, including
+            # its conversion of read/decompression errors into a JSON 400.
+            raise HTTPException(
+                status_code=400, detail="There was an error parsing the body"
+            ) from error
+        headers = dict(request.headers)
         try:
             model = await self._data_plane._model_registry.get_model(
                 model_name, model_version
