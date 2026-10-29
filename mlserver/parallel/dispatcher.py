@@ -256,6 +256,8 @@ class Dispatcher:
             return
         except Exception:
             if not self._active:
+                # A failure already queued when close started must not create
+                # a new reader after its executor has been shut down.
                 return
             logger.exception("Response processing loop crashed. Restarting the loop...")
             # If process loop crashed, restart it
@@ -352,10 +354,13 @@ class Dispatcher:
         worker.send_update(worker_update)
         return await self._async_responses.schedule_and_wait(worker_update, worker)
 
-    async def stop(self):
+    async def stop(self, timeout: float = 5):
         self._active = False
         self._ready_workers.clear()
         self._reset_round_robin()
+        # A worker killed while writing can leave a broken response queue.
+        # Never block the event loop indefinitely in executor.shutdown().
+        self._executor.shutdown(wait=False)
         if self._transport is not None:
             await self._transport.close()
         if self._process_responses_task is not None:
@@ -364,4 +369,9 @@ class Dispatcher:
             if not self._process_responses_task.done():
                 self._responses.put(END_OF_QUEUE)
             await cancel_task(self._process_responses_task)
-        self._executor.shutdown()
+        for thread in self._executor._threads:
+            await asyncio.to_thread(thread.join, timeout)
+            if thread.is_alive():
+                raise RuntimeError(
+                    "Response reader did not exit; dispatcher resources remain owned"
+                )

@@ -27,3 +27,48 @@ resources released. This does not introduce a server termination policy.
 Extension hooks must not leave unowned detached native work after returning or
 raising. Wrappers must own the resources they replace. Arbitrary detached tasks
 created by extensions are not covered by the nested timeout contract.
+
+## Worker recovery
+
+A pool retains its dispatched update waiter after frontend timeout. It immediately
+removes all workers in that pool from routing. New pool mutations and replacement
+worker replay join this recovery. Committed replay settings are copied; a fresh
+load is added only after worker preparation succeeds, and failed replacements
+never enter pending replay. The recovery owner waits for the delivered operation
+to settle, then sends an unload (or replacement rollback) and requires its
+acknowledgement before restoring surviving workers to routing. Per-message UUIDs
+keep late responses separate from later operations. Retired frontend instances
+cannot issue a second unload against a newer committed instance.
+
+A failed rollback or unacknowledged unload leaves the pool quarantined, with its
+failure retained and reported by subsequent mutations. Close remains available.
+An already dispatched operation which never settles remains owned and quarantined
+until close confirms process exit. Other models in the same pool lose availability
+during this conservative recovery; their committed configurations are retained.
+Other pools remain independent. This adds no work to successful predictions.
+
+## Close
+
+Both pool and pool-registry close set closure requested before waiting for locks.
+They create one retained cleanup task. Concurrent or repeated callers join it;
+cancelling a caller stops only that caller's wait. Completed errors are reported
+again. Pool close attempts independent cleanup even after a failure. A failed
+pool is retained separately from pools eligible for new loads.
+
+Lock draining uses the existing model-operation timeout. Worker shutdown uses
+`parallel_workers_timeout` for graceful stop, then kill and bounded join. A worker
+reference is retained if exit cannot be confirmed. These are cooperative Python
+deadlines, not hard interruption of blocking native code or extension hooks.
+Normal server shutdown and startup-error cleanup await registry close. Explicit
+cancellation of the close waiter was the interrupted-close reproduction; that
+probe did not establish a failure of normal, uninterrupted server shutdown.
+
+Worker restart and recovery tasks use an explicit independent timeout context.
+Awaited nested operations retain the existing shared timeout. Extension authors
+spawning detached lifecycle work must give it an independent boundary and retain
+its owner; inheriting a nested context does not create independent ownership.
+
+If a killed worker leaves the response reader blocked, dispatcher shutdown reports
+that reader as unrecoverable after a bounded thread join and retains the owner.
+Python cannot forcibly terminate such a thread. This change does not add a policy
+for killing the server process; an operator must handle an unrecoverable shutdown.

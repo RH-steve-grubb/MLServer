@@ -158,8 +158,9 @@ async def test_close_is_terminal(inference_pool: InferencePool, sum_model: MLMod
 
 
 async def test_close_clears_tracking_when_worker_cleanup_fails(
-    inference_pool: InferencePool, sum_model: MLModel, mocker
+    settings: Settings, sum_model: MLModel, mocker
 ):
+    inference_pool = InferencePool(settings)
     inference_pool._worker_registry.add(sum_model.settings)
     inference_pool._pending_reload[inference_pool._model_key(sum_model.settings)] = (
         sum_model
@@ -177,6 +178,9 @@ async def test_close_clears_tracking_when_worker_cleanup_fails(
 
     assert inference_pool.empty()
     assert not inference_pool._pending_reload
+    with pytest.raises(RuntimeError, match="worker cleanup failed"):
+        await inference_pool.close()
+    assert not inference_pool._closing_workers
 
 
 def test_worker_registry_keeps_model_name_and_version_keys_distinct(
@@ -433,10 +437,12 @@ async def test_load_and_close_serialize(
     await asyncio.sleep(0)
 
     assert not close_task.done()
-    assert not inference_pool._closing
+    assert inference_pool._closing
 
     release_dispatch.set()
-    await asyncio.gather(load_task, close_task)
+    results = await asyncio.gather(load_task, close_task, return_exceptions=True)
+    assert isinstance(results[0], InferencePoolUnavailable)
+    assert results[1] is None
 
     assert inference_pool._closing
     assert inference_pool.empty()

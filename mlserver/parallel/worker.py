@@ -271,6 +271,16 @@ class Worker(Process):
         """
         self._model_updates.put(model_update)
 
+    def record_exit(self, exit_code: int) -> None:
+        """Record a child exit already confirmed by the registry's waitpid.
+
+        multiprocessing cannot poll the status again after SIGCHLD has reaped
+        the child. Preserve that confirmed status for join and close callers.
+        """
+        popen = getattr(self, "_popen", None)
+        if popen is not None:
+            popen.returncode = exit_code
+
     def close_queues(self):
         """Close this worker's parent-side queues."""
         self._model_updates.close()

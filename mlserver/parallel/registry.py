@@ -66,6 +66,9 @@ class InferencePoolRegistry:
             WeakValueDictionary()
         )
         self._closing = False
+        self._close_task: asyncio.Task | None = None
+        self._failed_pools: dict[str | None, InferencePool] = {}
+        self._worker_stop_tasks: set[asyncio.Task] = set()
         self._on_worker_stop = on_worker_stop
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
@@ -81,10 +84,17 @@ class InferencePoolRegistry:
 
         # Register sigchld signal handler (saving original to restore it later)
         self._original_sigchld_handler = signal.getsignal(signal.SIGCHLD)
-        signal.signal(
-            signal.SIGCHLD,
-            lambda *args: create_task_independent(self._handle_worker_stop(*args)),
-        )
+        signal.signal(signal.SIGCHLD, self._schedule_worker_stop)
+
+    def _schedule_worker_stop(self, signum, frame) -> None:
+        task = create_task_independent(self._handle_worker_stop(signum, frame))
+        self._worker_stop_tasks.add(task)
+        task.add_done_callback(self._worker_stop_done)
+
+    def _worker_stop_done(self, task: asyncio.Task) -> None:
+        self._worker_stop_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Worker-stop handling failed", exc_info=task.exception())
 
     async def _handle_worker_stop(self, signum, frame):
         try:
@@ -96,9 +106,6 @@ class InferencePoolRegistry:
                     # No more stopped children
                     break
                 exit_code = os.waitstatus_to_exitcode(wait_status)
-                if exit_code == 0:
-                    # Clean exit — no crash recovery needed
-                    continue
                 try:
                     # Notify all pools since we don't know which pool owns
                     # this PID — each pool checks internally
@@ -150,6 +157,10 @@ class InferencePoolRegistry:
         if inference_pool_gid is not None:
             env_hash = _append_gid_environment_hash(env_hash, inference_pool_gid)
 
+        if self._closing:
+            raise InferencePoolUnavailable()
+        if env_hash in self._failed_pools:
+            raise InferencePoolUnavailable(f"pool {env_hash} with failed cleanup")
         if env_hash in self._pools:
             return self._pools[env_hash]
 
@@ -185,6 +196,10 @@ class InferencePoolRegistry:
                 if self._default_pool is None:
                     raise InferencePoolUnavailable("default inference pool")
                 return self._default_pool
+            if inference_pool_gid in self._failed_pools:
+                raise InferencePoolUnavailable(
+                    f"pool {inference_pool_gid} with failed cleanup"
+                )
             if inference_pool_gid not in self._pools:
                 self._pools[inference_pool_gid] = InferencePool(
                     self._settings,
@@ -199,10 +214,16 @@ class InferencePoolRegistry:
         if inference_pool_gid is not None:
             env_hash = _append_gid_environment_hash(env_hash, inference_pool_gid)
 
+        if self._closing:
+            raise InferencePoolUnavailable()
+        if env_hash in self._failed_pools:
+            raise InferencePoolUnavailable(f"pool {env_hash} with failed cleanup")
         if env_hash in self._pools:
             return self._pools[env_hash]
 
         env = await self._extract_tarball(env_hash, env_tarball)
+        if self._closing:
+            raise InferencePoolUnavailable()
         self._pools[env_hash] = InferencePool(
             self._settings,
             env=env,
@@ -397,22 +418,54 @@ class InferencePoolRegistry:
             await self._close_pool(pool.pool_gid)
 
     async def close(self):
-        if self._closing:
-            return
-        self._closing = True
+        if self._close_task is None:
+            self._closing = True
+            self._close_task = create_task_independent(self._close())
+            self._close_task.add_done_callback(self._close_done)
+        await asyncio.shield(self._close_task)
+
+    def _close_done(self, task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is not None:
+            logger.error(
+                "Inference pool registry close failed; result and owners retained.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
+
+    async def _close(self):
         for lock in list(self._operation_locks.values()):
-            async with lock:
-                pass
+            try:
+                await asyncio.wait_for(
+                    lock.acquire(), self._settings.model_operation_timeout
+                )
+            except asyncio.TimeoutError:
+                logger.error("Lifecycle lock did not drain during registry close")
+            else:
+                lock.release()
         # Reset signal handler
         signal.signal(signal.SIGCHLD, self._original_sigchld_handler)
         # Best effort cleanup - closure attempted for all pools and
         # pools always removed from registry
         results = await asyncio.gather(
             self._close_pool(None),
-            *[self._close_pool(env_hash) for env_hash in self._pools],
+            *[
+                self._close_pool(key)
+                for key in set(self._pools) | set(self._failed_pools)
+                if key is not None
+            ],
             return_exceptions=True,
         )
-        failures = [r for r in results if isinstance(r, Exception)]
+        failures = [r for r in results if isinstance(r, BaseException)]
+        if self._worker_stop_tasks:
+            _, pending_handlers = await asyncio.wait(
+                list(self._worker_stop_tasks),
+                timeout=self._settings.model_operation_timeout,
+            )
+            if pending_handlers:
+                failures.append(
+                    RuntimeError(
+                        "Worker-stop cleanup has not settled; ownership retained"
+                    )
+                )
         if failures:
             raise failures[0]
 
@@ -421,14 +474,18 @@ class InferencePoolRegistry:
         if env_hash is not None:
             pool = self._pools.get(env_hash)
         if pool is None:
+            pool = self._failed_pools.get(env_hash)
+        if pool is None:
             return
 
         # Best effort cleanup
         logger.info(f"Waiting for shutdown of {pool.name}...")
         try:
             await pool.close()
+            self._failed_pools.pop(env_hash, None)
             logger.info(f"Shutdown of {pool.name} complete")
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            self._failed_pools[env_hash] = pool
             logger.error(
                 f"Failed to shut down {pool.name}.",
                 exc_info=True,
@@ -438,8 +495,6 @@ class InferencePoolRegistry:
             # Always remove pool from registry,
             # cannot guarantee pool state at this point
             if env_hash is not None:
-                pool = self._pools.pop(env_hash, None)
-                if pool is not None:
-                    pool._env = None  # pylint: disable=protected-access
+                self._pools.pop(env_hash, None)
             else:
                 self._default_pool = None

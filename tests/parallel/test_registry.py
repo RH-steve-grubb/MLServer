@@ -304,13 +304,16 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
     inference_pool_registry: InferencePoolRegistry,
     pool_id: str | None,
     expected_name: str,
+    sum_model_settings: ModelSettings,
 ):
     class FailingPool:
+        failure = True
         name = expected_name
         _env = object()
 
         async def close(self):
-            raise RuntimeError("pool cleanup failed")
+            if self.failure:
+                raise RuntimeError("pool cleanup failed")
 
     failing_pool = cast(InferencePool, FailingPool())
     original_default_pool = inference_pool_registry._default_pool
@@ -323,11 +326,19 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
         with pytest.raises(RuntimeError, match="pool cleanup failed"):
             await inference_pool_registry._close_pool(pool_id)
 
+        assert inference_pool_registry._failed_pools[pool_id] is failing_pool
+        settings = deepcopy(sum_model_settings)
+        assert settings.parameters is not None
+        settings.parameters.inference_pool_gid = pool_id
+        with pytest.raises(InferencePoolUnavailable):
+            await inference_pool_registry.load_model(SumModel(settings))
         if pool_id is None:
             assert inference_pool_registry._default_pool is None
         else:
             assert pool_id not in inference_pool_registry._pools
     finally:
+        setattr(failing_pool, "failure", False)
+        await inference_pool_registry._close_pool(pool_id)
         if pool_id is None and original_default_pool is not None:
             await original_default_pool.close()
 

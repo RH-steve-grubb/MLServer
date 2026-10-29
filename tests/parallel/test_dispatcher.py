@@ -338,7 +338,7 @@ async def test_stop_cleans_up_response_processing(responses, mocker):
     assert workers == {worker_pid: worker}
     assert response_task is not None
     assert response_task.done()
-    shutdown_executor.assert_called_once_with()
+    shutdown_executor.assert_called_once_with(wait=False)
     with pytest.raises(NoWorkersAvailable):
         dispatcher._get_worker()
 
@@ -367,3 +367,17 @@ async def test_late_response_cannot_resolve_newer_request(event_loop, load_messa
     finally:
         newer.cancel()
         event_loop.set_exception_handler(original_handler)
+
+
+async def test_stopped_dispatcher_does_not_restart_failed_reader(responses, mocker):
+    dispatcher = Dispatcher({}, responses)
+    start = mocker.patch.object(dispatcher, "start")
+
+    async def fail():
+        raise RuntimeError("reader failed as shutdown started")
+
+    task = asyncio.create_task(fail())
+    await asyncio.gather(task, return_exceptions=True)
+    dispatcher._process_responses_cb(task)
+    start.assert_not_called()
+    await dispatcher.stop()

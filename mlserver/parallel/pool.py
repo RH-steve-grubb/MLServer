@@ -128,6 +128,7 @@ class InferencePool:
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False
+        self._close_task: asyncio.Task | None = None
         self._closing_workers: dict[int, Worker] = {}
         self._restart_tasks: set[asyncio.Task] = set()
         self._recovery_task: asyncio.Task | None = None
@@ -189,10 +190,14 @@ class InferencePool:
         # If the inference pool is closing, or the current worker
         # is not in this inference pool, worker stop handling
         # should be skipped
+        if pid in self._closing_workers:
+            self._closing_workers[pid].record_exit(exit_code)
+            return
         if pid not in self._workers:
             return
 
         worker = self._workers[pid]
+        worker.record_exit(exit_code)
         logger.warning(
             f"Worker with PID {worker.pid} on {self.name} stopped "
             f"unexpectedly with exit code {exit_code}. "
@@ -544,17 +549,40 @@ class InferencePool:
     def empty(self) -> bool:
         return len(self._worker_registry) == 0
 
-    @with_operation_lock(lambda self: self._operation_lock)
     async def close(self) -> None:
-        if self._closing:
-            return
-        self._closing = True
+        if self._close_task is None:
+            self._closing = True
+            for model in list(self._staged):
+                self._release_stage(model)
+            self._close_task = create_task_independent(self._close())
+            self._close_task.add_done_callback(self._close_done)
+        await asyncio.shield(self._close_task)
+
+    def _close_done(self, task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is not None:
+            logger.error(
+                f"Close of {self.name} failed; result and resources retained.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
+
+    async def _close(self) -> None:
+        # Existing accepted operations get their configured window to settle.
+        # If they stall, closure escalates to process exit rather than waiting
+        # forever on a frontend lifecycle lock.
+        try:
+            await asyncio.wait_for(
+                self._operation_lock.acquire(), self._settings.model_operation_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Lifecycle lock did not drain while closing {self.name}")
+        else:
+            self._operation_lock.release()
 
         # Best effort cleanup
-        cleanup_errors = []
+        cleanup_errors: list[BaseException] = []
         try:
             await self._close_workers()
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to fully cleanup workers on {self.name}",
                 exc_info=True,
@@ -563,7 +591,7 @@ class InferencePool:
 
         try:
             await terminate_queue(self._responses)
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to terminate response queue on {self.name}",
                 exc_info=True,
@@ -571,8 +599,8 @@ class InferencePool:
             cleanup_errors.append(e)
 
         try:
-            await self._dispatcher.stop()
-        except Exception as e:
+            await self._dispatcher.stop(self._settings.parallel_workers_timeout)
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to stop dispatcher on {self.name}",
                 exc_info=True,
@@ -583,18 +611,24 @@ class InferencePool:
             # The dispatcher's executor may still be reading this handle.
             # Stop and join that reader before closing the queue.
             self._responses.close()
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to close response queue on {self.name}",
                 exc_info=True,
             )
             cleanup_errors.append(e)
 
-        if self._transport_directory is not None:
+        if self._recovery_task is not None:
             try:
-                self._transport_directory.cleanup()
-            except Exception as error:
+                await asyncio.wait_for(
+                    asyncio.shield(self._recovery_task),
+                    self._settings.model_operation_timeout,
+                )
+            except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
+        if self._restart_tasks:
+            results = await asyncio.gather(*self._restart_tasks, return_exceptions=True)
+            cleanup_errors.extend(r for r in results if isinstance(r, BaseException))
 
         # The pool is terminal after close. No model state can be replayed or
         # rolled back, so release the tracking references after cleanup.
@@ -606,51 +640,50 @@ class InferencePool:
             self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
             raise cleanup_errors[0]
 
-    async def _close_workers(self):
-        cleanup_errors = []
-        for pid, worker in list(self._workers.items()):
-            # Remove from registry first so that the SIGCHLD handler's
-            # on_worker_stop call returns early (pid not in _workers),
-            # preventing duplicate cleanup
-            if pid in self._workers:
-                del self._workers[pid]
-            else:
-                continue
+        if self._transport_directory is not None:
+            # Its endpoints are resources of the workers and dispatcher. Retain
+            # their directory too if cleanup did not confirm their release.
+            self._transport_directory.cleanup()
 
-            # Best effort cleanup
+    async def _close_workers(self):
+        cleanup_errors: list[BaseException] = []
+        self._closing_workers.update(self._workers)
+        for pid, worker in list(self._closing_workers.items()):
+            # Quarantine first, but keep a resource-owning reference until exit
+            # has actually been observed. A kill request is not confirmation.
+            self._dispatcher.on_worker_stop(worker, -1)
             try:
-                await worker.stop()
-                worker.join(self._settings.parallel_workers_timeout)
-            except Exception as e:
-                logger.error(
-                    "Failed to complete cleanup of worker "
-                    f"with PID {pid} on {self.name}. ",
-                    exc_info=True,
+                await asyncio.wait_for(
+                    worker.stop(), self._settings.parallel_workers_timeout
                 )
-                cleanup_errors.append(e)
-            finally:
-                # Always ensure the worker is terminated
+                await asyncio.to_thread(
+                    worker.join, self._settings.parallel_workers_timeout
+                )
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
+            try:
                 if worker.exitcode is None:
                     worker.kill()
-
-            logger.debug(f"Worker with PID {pid} on {self.name} stopped.")
-
-            # Cancel any in-flight requests for this worker
-            self._dispatcher.on_worker_stop(
-                worker, worker.exitcode if worker.exitcode is not None else -1
-            )
+                    await asyncio.to_thread(
+                        worker.join, self._settings.parallel_workers_timeout
+                    )
+                if worker.exitcode is None:
+                    raise RuntimeError(f"Worker {pid} has not confirmed exit")
+                worker.close_queues()
+                del self._closing_workers[pid]
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
+                continue
 
             results = await asyncio.gather(
-                *[callback(worker) for callback in self._on_worker_stop],
+                *[
+                    asyncio.wait_for(
+                        callback(worker), self._settings.parallel_workers_timeout
+                    )
+                    for callback in self._on_worker_stop
+                ],
                 return_exceptions=True,
             )
-            failures = [r for r in results if isinstance(r, Exception)]
-            if failures:
-                logger.error(
-                    f"{len(failures)} worker stop hook(s) failed "
-                    f"for worker with PID {pid} on {self.name}",
-                )
-                cleanup_errors.extend(failures)
-
+            cleanup_errors.extend(r for r in results if isinstance(r, BaseException))
         if cleanup_errors:
             raise cleanup_errors[0]
