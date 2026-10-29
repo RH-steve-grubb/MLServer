@@ -1,6 +1,7 @@
 import asyncio
 import os
 import signal
+from pathlib import Path
 
 from collections.abc import Sequence
 
@@ -19,6 +20,7 @@ from .pool import InferencePool, InferencePoolHook
 from .worker import WorkerModelHook
 
 ENV_HASH_ATTR = "__env_hash__"
+_INCOMPLETE_ENV_FILE = ".mlserver-extraction-incomplete"
 
 
 def _set_environment_hash(model: MLModel, env_hash: str | None):
@@ -68,6 +70,7 @@ class InferencePoolRegistry:
         self._closing = False
         self._close_task: asyncio.Task | None = None
         self._failed_pools: dict[str | None, InferencePool] = {}
+        self._environment_tasks: dict[str, asyncio.Task[Environment]] = {}
         self._worker_stop_tasks: set[asyncio.Task] = set()
         self._on_worker_stop = on_worker_stop
         self._on_worker_load = on_worker_load
@@ -235,13 +238,46 @@ class InferencePoolRegistry:
         return self._pools[env_hash]
 
     async def _extract_tarball(self, env_hash: str, env_tarball: str) -> Environment:
-        env_path = self._get_env_path(env_hash)
-        if os.path.isdir(env_path):
-            # If env has already been extracted, use that
-            return Environment(env_path, env_hash)
+        task = self._environment_tasks.get(env_hash)
+        if task is None:
+            env_path = self._get_env_path(env_hash)
+            marker = Path(env_path) / _INCOMPLETE_ENV_FILE
+            if os.path.isdir(env_path):
+                if marker.exists():
+                    raise RuntimeError(
+                        f"Environment {env_hash} has an incomplete extraction; "
+                        "remove the incomplete directory before retrying"
+                    )
+                return Environment(env_path, env_hash)
+            os.makedirs(env_path)
+            marker.touch(exist_ok=False)
+            # Extraction runs in a thread. Cancellation of its waiter cannot
+            # release ownership or make a partial directory reusable.
+            task = create_task_independent(
+                self._prepare_environment(env_hash, env_tarball)
+            )
+            self._environment_tasks[env_hash] = task
+            task.add_done_callback(self._environment_done)
+        env = await asyncio.shield(task)
+        self._environment_tasks.pop(env_hash, None)
+        return env
 
-        os.makedirs(env_path)
-        return await Environment.from_tarball(env_tarball, env_path, env_hash)
+    async def _prepare_environment(
+        self,
+        env_hash: str,
+        env_tarball: str,
+    ) -> Environment:
+        env_path = self._get_env_path(env_hash)
+        env = await Environment.from_tarball(env_tarball, env_path, env_hash)
+        (Path(env_path) / _INCOMPLETE_ENV_FILE).unlink()
+        return env
+
+    def _environment_done(self, task: asyncio.Task[Environment]) -> None:
+        if task.cancelled() or task.exception() is not None:
+            logger.error(
+                "Environment extraction failed; ownership retained until close.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
 
     def _get_env_path(self, env_hash: str) -> str:
         return os.path.join(self._settings.environments_dir, env_hash)
@@ -466,6 +502,24 @@ class InferencePoolRegistry:
                         "Worker-stop cleanup has not settled; ownership retained"
                     )
                 )
+        if self._environment_tasks:
+            done, pending = await asyncio.wait(
+                list(self._environment_tasks.values()),
+                timeout=self._settings.model_operation_timeout,
+            )
+            failures.extend(
+                task.exception()
+                for task in done
+                if not task.cancelled() and task.exception() is not None
+            )
+            if pending:
+                failures.append(
+                    RuntimeError(
+                        "Environment extraction has not settled; ownership retained"
+                    )
+                )
+            elif not failures:
+                self._environment_tasks.clear()
         if failures:
             raise failures[0]
 

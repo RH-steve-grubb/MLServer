@@ -72,3 +72,15 @@ If a killed worker leaves the response reader blocked, dispatcher shutdown repor
 that reader as unrecoverable after a bounded thread join and retains the owner.
 Python cannot forcibly terminate such a thread. This change does not add a policy
 for killing the server process; an operator must handle an unrecoverable shutdown.
+
+Environment extraction uses a retained task because its thread cannot be cancelled.
+Retries join that task; they cannot treat a partial directory as a usable environment.
+An incomplete marker also prevents reuse after the owner process exits. Failed
+extractions retain their error and require removal of the incomplete directory
+before retrying in a new registry. Close bounds its wait for extraction and reports
+any unsettled owner without cancelling the underlying thread.
+
+Cancelling an owned local cleanup task also preserves its preparation reference.
+A retry joins preparation before releasing resources. If preparation itself is
+cancelled by external code, native completion cannot be established: cleanup
+reports the uncertain state and keeps the owner rather than unloading concurrently.

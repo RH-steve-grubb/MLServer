@@ -176,3 +176,52 @@ async def test_later_hook_timeout_cannot_enter_replay(
     finally:
         release.set()
         await asyncio.gather(operation, return_exceptions=True)
+
+
+async def test_environment_extraction_retains_ownership(
+    inference_pool_registry, monkeypatch
+):
+    from mlserver.env import Environment
+
+    registry = inference_pool_registry
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def extract(tarball, env_path, env_hash):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        await release.wait()
+        return Environment(env_path, env_hash)
+
+    monkeypatch.setattr(Environment, "from_tarball", extract)
+    first = asyncio.create_task(registry._extract_tarball("owned", "unused"))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        second = asyncio.create_task(registry._extract_tarball("owned", "unused"))
+        await asyncio.sleep(0)
+        assert not second.done()
+        release.set()
+        env = await asyncio.wait_for(second, 5)
+        assert env.env_hash == "owned"
+        assert calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(
+            first, *([second] if second else []), return_exceptions=True
+        )
+
+
+async def test_incomplete_extraction_is_not_reused_after_owner_exit(
+    inference_pool_registry,
+):
+    registry = inference_pool_registry
+    directory = Path(registry._get_env_path("incomplete"))
+    directory.mkdir()
+    (directory / ".mlserver-extraction-incomplete").touch()
+    with pytest.raises(RuntimeError, match="incomplete extraction"):
+        await registry._extract_tarball("incomplete", "unused")
