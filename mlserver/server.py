@@ -151,8 +151,20 @@ class MLServer:
             self._startup_model_tasks.clear()
 
             # Mark startup complete only if all models loaded successfully
+            self._data_plane.startup_complete()
+
+            if not models_settings and not self._settings.empty_registry_readiness:
+                logger.warning(
+                    "No models were loaded at startup and empty_registry_readiness "
+                    "is False, so the server will report not ready until a model is "
+                    "loaded. If models were expected, check that "
+                    "load_models_at_startup is enabled, that the model repository "
+                    "contains models, and the logs above for any model settings that "
+                    "failed to load. To load models dynamically into an empty "
+                    "server, set empty_registry_readiness to True."
+                )
+
             # Then await the server tasks throughout the lifetime of MLServer
-            self._model_registry.startup_complete()
             await asyncio.gather(*self._server_tasks)
         except (Exception, asyncio.CancelledError) as start_error:
             if isinstance(start_error, asyncio.CancelledError):

@@ -464,28 +464,6 @@ class MultiModelRegistry:
         self._on_model_unload = on_model_unload
         self._model_initialiser = model_initialiser
         self._model_operation_timeout = model_operation_timeout
-        self._startup_complete = False
-
-    @property
-    def is_startup_complete(self) -> bool:
-        """
-        Check if startup load phase has completed.
-
-        Returns False until _startup_complete is set to True,
-        regardless of model states. This prevents race conditions
-        where the registry is empty during initial startup.
-        """
-        return self._startup_complete
-
-    def startup_complete(self) -> None:
-        """
-        Mark that the initial server startup phase has completed.
-
-        This should only be called by the server's main startup process
-        after all initial models have been loaded. Once called, the registry
-        will report as startup-complete for readiness checks.
-        """
-        self._startup_complete = True
 
     def _get_operation_lock(self, name: str) -> asyncio.Lock:
         return self._operation_locks.setdefault(name, asyncio.Lock())

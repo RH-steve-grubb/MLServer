@@ -24,15 +24,22 @@ async def test_ready(data_plane, model_registry, ready):
     assert all_ready == ready
 
 
-async def test_ready_returns_false_when_startup_not_complete(data_plane_during_startup):
+@pytest.mark.parametrize("strict_readiness", [True, False])
+async def test_ready_returns_false_when_startup_not_complete(
+    data_plane_during_startup, strict_readiness
+):
     """
     Health check returns False when startup hasn't completed.
-    This is true even in lenient mode - strict_readiness is ignored during startup.
+    This is true in both strict and lenient mode - strict_readiness is ignored
+    during startup. Once startup_complete() is called, the readiness settings apply.
     """
-    # Set lenient mode to prove it's ignored during startup
-    data_plane_during_startup._settings.strict_readiness = False
+    data_plane_during_startup._settings.strict_readiness = strict_readiness
 
     assert not await data_plane_during_startup.ready()
+
+    data_plane_during_startup.startup_complete()
+
+    assert await data_plane_during_startup.ready()
 
 
 async def test_ready_with_failed_dynamic_model(
@@ -66,11 +73,16 @@ async def test_ready_with_failed_dynamic_model(
         await model_registry.get_model(load_error_model_settings.name)
 
 
-async def test_ready_with_empty_registry_default(settings, data_plane, model_registry):
+@pytest.mark.parametrize("strict_readiness", [True, False])
+async def test_ready_with_empty_registry_default(
+    settings, data_plane, model_registry, strict_readiness
+):
     """
     Test that empty registry returns True when empty_registry_readiness=True
-    (default behavior).
+    (default behavior), in both strict and lenient mode.
     """
+    data_plane._settings.strict_readiness = strict_readiness
+
     # Verify default setting
     assert settings.empty_registry_readiness is True
 
@@ -86,10 +98,16 @@ async def test_ready_with_empty_registry_default(settings, data_plane, model_reg
     assert all_ready
 
 
-async def test_ready_with_empty_registry_disabled(settings, data_plane, model_registry):
+@pytest.mark.parametrize("strict_readiness", [True, False])
+async def test_ready_with_empty_registry_disabled(
+    settings, data_plane, model_registry, strict_readiness
+):
     """
-    Test that empty registry returns False when empty_registry_readiness=False.
+    Test that empty registry returns False when empty_registry_readiness=False,
+    in both strict and lenient mode.
     """
+    data_plane._settings.strict_readiness = strict_readiness
+
     # Configure to report not ready when registry is empty
     data_plane._settings.empty_registry_readiness = False
 
@@ -105,13 +123,17 @@ async def test_ready_with_empty_registry_disabled(settings, data_plane, model_re
     assert not all_ready
 
 
+@pytest.mark.parametrize("strict_readiness", [True, False])
 async def test_ready_with_non_empty_registry_flag_ignored(
-    data_plane, model_registry, sum_model
+    data_plane, model_registry, sum_model, strict_readiness
 ):
     """
     Test that empty_registry_readiness flag doesn't affect behavior when
-    registry has models. The flag should ONLY matter when registry is empty.
+    registry has models, in both strict and lenient mode. The flag should ONLY
+    matter when registry is empty.
     """
+    data_plane._settings.strict_readiness = strict_readiness
+
     # Set flag to False (would make empty registry report not ready)
     data_plane._settings.empty_registry_readiness = False
 
@@ -152,8 +174,8 @@ async def test_ready_lenient_mode_after_startup(
     data_plane, model_registry, simple_model_settings
 ):
     """
-    Test that strict_readiness=False allows health check to pass if
-    AT LEAST ONE model is ready (after startup completes).
+    Test that strict_readiness=False allows health check to pass even if
+    some models are not ready (after startup completes).
     """
 
     # Enable lenient mode
@@ -163,8 +185,7 @@ async def test_ready_lenient_mode_after_startup(
     loaded_model = await model_registry.load(simple_model_settings)
     loaded_model.ready = False
 
-    # Health check should return True (lenient mode: at least one ready)
-    # sum-model (from fixture) is ready=True
+    # Health check should return True (lenient mode: model state is ignored)
     all_ready = await data_plane.ready()
     assert all_ready
 
@@ -179,8 +200,8 @@ async def test_ready_lenient_mode_with_no_ready_models(
     data_plane, model_registry, sum_model
 ):
     """
-    Test that strict_readiness=False still returns False when
-    NO models are ready.
+    Test that strict_readiness=False returns True even when NO models are
+    ready, so that model lifecycle requests are never blocked by readiness.
     """
     # Enable lenient mode
     data_plane._settings.strict_readiness = False
@@ -188,9 +209,9 @@ async def test_ready_lenient_mode_with_no_ready_models(
     # Mark all models as not ready
     sum_model.ready = False
 
-    # Health check should return False (no models ready)
-    all_ready = await data_plane.ready()
-    assert not all_ready
+    # Health check should return True (lenient mode: model state is ignored)
+    ready = await data_plane.ready()
+    assert ready
 
 
 @pytest.mark.parametrize("ready", [True, False])

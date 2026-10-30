@@ -58,10 +58,12 @@ models/
 
 MLServer discovers and loads all models at startup when `load_models_at_startup: true` (default).
 
+Models loaded at startup need no extra readiness configuration: the server is ready once they have all loaded. By default the server is not ready while a new model or model version is loading, including models loaded later through the model repository API. If you load models dynamically, consider setting `strict_readiness: false` (`MLSERVER_STRICT_READINESS=false`) and checking models individually via `/v2/models/{name}/ready`. See [Readiness Behavior](deployment.md#readiness-behavior).
+
 ### How do I serve multiple versions of the same model?
 
 Set the `parameters.version` field in each model's `model-settings.json`.
-When a version is not specified in inference requests, MLServer routes to the latest version (determined by lexicographic or numeric comparison).
+When a version is not specified in inference requests, MLServer routes to the default (latest) version (determined by lexicographic or numeric comparison). This includes a new default version that is still loading, so requests without a version fail with `ModelNotReady` until it is ready. To keep using an older version in the meantime, request it explicitly.
 
 ### Can I load and unload models at runtime?
 
@@ -107,8 +109,8 @@ Check these in order:
 
 1. **Startup not complete** — During initial model loading, the server always reports not ready. Wait for all models to finish loading.
 2. **Model load failure** — Check logs for "Couldn't load model" errors. Failed models are removed from the registry.
-3. **`strict_readiness: true`** — All models must be ready. If any model is in a failed state, the server reports not ready.
-4. **`empty_registry_readiness: false`** — If no models are loaded and this setting is false, the server reports not ready.
+3. **A model is loading** — With `strict_readiness: true` (default), the server reports not ready while a new model or model version is loading, including models loaded through the model repository API. With `strict_readiness: false`, loading does not affect readiness; check models individually via `/v2/models/{name}/ready`.
+4. **`empty_registry_readiness: false`** — If no models are loaded and this setting is false, the server reports not ready, in both strict and lenient mode.
 
 ### I get "Model not found" errors
 

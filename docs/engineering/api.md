@@ -439,8 +439,8 @@ class MyModel(MLModel):
 | `parallel_workers_timeout` | int | `5` | Worker shutdown grace timeout (seconds) |
 | `model_repository_root` | string | `.` | Path to model repository |
 | `load_models_at_startup` | bool | `true` | Auto-load models on start |
-| `strict_readiness` | bool | `true` | Require ALL models ready for server readiness |
-| `empty_registry_readiness` | bool | `true` | Report ready when no models are loaded |
+| `strict_readiness` | bool | `true` | If true, all models in the registry must be ready. If false, model readiness is ignored after startup; an empty registry follows `empty_registry_readiness` |
+| `empty_registry_readiness` | bool | `true` | Report ready when no models are in the registry (both readiness modes) |
 | `gzip_enabled` | bool | `true` | Enable GZip compression |
 | `log_level` | string | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
 | `access_log` | bool | `true` | Enable REST/gRPC access logging |

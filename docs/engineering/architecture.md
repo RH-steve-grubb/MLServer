@@ -164,14 +164,11 @@ classDiagram
 
     class MultiModelRegistry {
         -dict~str,SingleModelRegistry~ _models
-        -bool _startup_complete
         +load(model_settings) MLModel
         +unload(name) void
         +unload_version(name, version) void
         +get_model(name, version) MLModel
         +get_models(name) list~MLModel~
-        +startup_complete() void
-        +is_startup_complete bool
     }
 
     class SingleModelRegistry {
@@ -187,9 +184,12 @@ classDiagram
     class DataPlane {
         -Settings _settings
         -MultiModelRegistry _model_registry
+        -bool _startup_complete
         -InferenceMiddlewares _inference_middleware
         +live() bool
         +ready() bool
+        +startup_complete() void
+        +is_startup_complete bool
         +model_ready(name, version) bool
         +metadata() MetadataServerResponse
         +runtimes() RuntimeSecurityResponse
@@ -747,7 +747,7 @@ flowchart LR
    becomes accessible.
 2. Start all transport servers concurrently via `asyncio.gather()`.
 3. Load all models from the model repository concurrently.
-4. Mark `startup_complete()` — the readiness endpoint begins returning `true`.
+4. Mark `startup_complete()` on the `DataPlane` — the readiness endpoint stops reporting not ready because of startup. From then on it follows `strict_readiness` and `empty_registry_readiness`.
 5. If any model fails to load during startup, the server shuts down
    gracefully.
 
@@ -781,8 +781,8 @@ variables, `.env` files, and JSON configuration files.
 | `parallel_workers` | 1 | Number of multiprocessing workers (1 = disabled) |
 | `max_batch_size` | 0 | Adaptive batching batch size (0 = disabled) |
 | `max_batch_time` | 0.0 | Adaptive batching time window in seconds |
-| `strict_readiness` | true | All models must be ready vs. at least one |
-| `empty_registry_readiness` | true | Report ready when no models loaded |
+| `strict_readiness` | true | If true, all models in the registry must be ready. If false, model readiness is ignored after startup; an empty registry follows `empty_registry_readiness` |
+| `empty_registry_readiness` | true | Report ready when no models are in the registry (both readiness modes) |
 
 ---
 

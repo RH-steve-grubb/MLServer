@@ -386,7 +386,16 @@ class Settings(BaseSettings):
     """Extra parameters for model repository."""
 
     load_models_at_startup: bool = True
-    """Flag to load all available models automatically at startup."""
+    """
+    Flag to load all available models from the model repository automatically
+    at startup. Only the `mlserver start` command reads this flag.
+    `MLServer.start()` loads just the models passed to it, whatever this is set
+    to.
+
+    If False, `mlserver start` starts the server with an empty model registry,
+    and models can be loaded later through the model repository API. While the
+    registry is empty, readiness follows `empty_registry_readiness`.
+    """
 
     empty_registry_readiness: bool = True
     """
@@ -394,19 +403,39 @@ class Settings(BaseSettings):
     If True (default), the server reports ready when the model registry is empty.
     If False, the server reports not ready when the model registry is empty.
 
-    Note: This flag only applies AFTER server startup completes. During startup,
-    an empty registry always reports not ready to prevent race conditions.
+    Set this to False to require that models are present, e.g. when they are
+    expected to be loaded at startup. While the registry is empty, orchestrators
+    that use the readiness check (e.g. a Kubernetes Service) stop routing traffic
+    to the server, so models cannot be loaded into it through that route. Keep
+    this True to load models dynamically into an empty server.
+
+    Note: This flag applies in both strict and lenient readiness modes, but only
+    AFTER server startup completes. During startup, the server always reports not
+    ready.
     """
 
     strict_readiness: bool = True
     """
-    Flag to control readiness check behavior for loaded models.
-    If True (default), ALL models must be ready for health check to pass.
-    If False, AT LEAST ONE model must be ready for health check to pass.
+    Flag to control how model state affects the server readiness check.
+    If True (default), the server is ready only if every model in the registry is
+    ready, as the V2 inference protocol requires.
+    If False, model state is ignored for readiness.
 
-    Note: During server startup, readiness is always strict (all models must be ready)
-    regardless of this setting. This prevents race conditions during startup failures.
-    After startup completes, this setting takes effect.
+    Set this to False when models are loaded dynamically after startup.
+    A new model or model version is not ready while it loads, so with True the
+    server is not ready during the load. With False it stays ready, so the
+    traffic to the server is not blocked, including requests to
+    already loaded models and future model lifecycle operations. This
+    deliberately departs from the V2 protocol. Check individual models through
+    the model ready endpoint.
+
+    Readiness only gates routing to the server. It does not change which version
+    a request without a version resolves to: that is always the default (latest)
+    registered version, even while it is still loading.
+
+    An empty registry follows `empty_registry_readiness` in both modes.
+
+    Note: In both modes the server reports not ready until startup completes.
     """
 
     # Server metadata
