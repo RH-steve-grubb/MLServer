@@ -56,6 +56,14 @@ until close confirms process exit. Other models in the same pool lose availabili
 during this conservative recovery; their committed configurations are retained.
 Other pools remain independent. This adds no work to successful predictions.
 
+Automatic pool retirement also counts staged frontend preparation and pending
+replacements. Removing the last committed model cannot close
+a pool still needed by an accepted load. Publication, or acknowledged cleanup of
+an abandoned load, transfers/releases that owner before automatic retirement is
+checked again. An otherwise empty abandoned pool may retire through its retained
+close operation, which owns recovery through settlement or confirmed worker exit.
+Explicit registry close remains terminal for all preparation.
+
 ## Close
 
 Both pool and pool-registry close set closure requested before waiting for locks.

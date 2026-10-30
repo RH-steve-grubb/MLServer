@@ -560,7 +560,16 @@ class InferencePool:
         return self._worker_registry.has_model(model_settings)
 
     def empty(self) -> bool:
-        return len(self._worker_registry) == 0
+        # Replay inventory excludes preparation, but those accepted operations
+        # still own the pool. Do not auto-close it between staging and commit.
+        # An abandoned update alone can retire through close(), which retains
+        # recovery and confirms worker exit. Registry callers check
+        # this under their pool lifecycle lock; these owner transfers do not yield.
+        return (
+            len(self._worker_registry) == 0
+            and not self._staged
+            and not self._pending_reload
+        )
 
     async def close(self) -> None:
         if self._close_task is None:
