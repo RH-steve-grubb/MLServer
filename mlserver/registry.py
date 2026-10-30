@@ -338,7 +338,7 @@ class SingleModelRegistry:
         metrics but the registry is always cleared, since a model that fails to
         unload cleanly is still removed from the active registry.
         """
-        await self._drain_cleanup(retry=True)
+        retained_failures = await self._retry_cleanup()
         models = await self.get_models()
 
         # Perform all unloads concurrently and wait for results to ensure
@@ -348,7 +348,11 @@ class SingleModelRegistry:
                 *[self._unload_model(model) for model in models],
                 return_exceptions=True,
             )
-            unload_failures = [r for r in results if isinstance(r, Exception)]
+            unload_failures = [r for r in results if isinstance(r, BaseException)]
+            if retained_failures:
+                # Report the retained cause after independent versions have
+                # also been attempted. Failed resource owners remain tracked.
+                raise retained_failures[0]
             if unload_failures:
                 raise ModelUnloadError(
                     f"Failed to unload {len(unload_failures)} version(s) of "
@@ -509,6 +513,36 @@ class SingleModelRegistry:
                 self._cleanup_tasks.pop(model)
                 task = self._start_cleanup(model)
             await asyncio.shield(task)
+
+    async def _retry_cleanup(self) -> list[BaseException]:
+        # Join unfinished mutations before starting any independent cleanup.
+        # A cancelled cleanup waiter may still own live preparation separately.
+        for model, task in list(self._cleanup_tasks.items()):
+            if not task.done():
+                try:
+                    await asyncio.shield(task)
+                except Exception:
+                    pass
+            preparation = self._cleanup_preparations.get(model)
+            if preparation is not None:
+                try:
+                    await asyncio.shield(preparation)
+                except asyncio.CancelledError:
+                    if preparation.cancelled():
+                        raise ModelUnloadError(
+                            "Preparation completion is uncertain; ownership retained"
+                        )
+                    raise
+                except Exception:
+                    pass
+
+        retries = []
+        for model, task in list(self._cleanup_tasks.items()):
+            if task.cancelled() or task.exception() is not None:
+                self._cleanup_tasks.pop(model)
+                retries.append(asyncio.shield(self._start_cleanup(model)))
+        results = await asyncio.gather(*retries, return_exceptions=True)
+        return [result for result in results if isinstance(result, BaseException)]
 
     async def _cleanup_model(
         self,

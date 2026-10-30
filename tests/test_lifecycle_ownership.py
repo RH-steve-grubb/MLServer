@@ -513,3 +513,112 @@ async def test_redirected_commit_owns_both_displaced_instances(
         registry._model_operation_timeout = 5
         monkeypatch.setattr(loaded["2"], "unload", cleanup_original)
         await registry.unload(settings.name)
+
+
+@pytest.mark.parametrize("retained_count", [1, 3])
+async def test_unload_all_attempts_every_settled_cleanup_owner(
+    sum_model_settings, monkeypatch, retained_count
+):
+    registry = MultiModelRegistry()
+    models = []
+    attempts = {}
+    for version in range(retained_count + 1):
+        settings = sum_model_settings.model_copy(deep=True)
+        settings.parameters.version = str(version)
+        models.append(await registry.load(settings))
+    failed, healthy = models[:-1], models[-1]
+    healthy_cleaned = asyncio.Event()
+
+    async def clean():
+        healthy_cleaned.set()
+        return True
+
+    monkeypatch.setattr(healthy, "unload", clean)
+    for model in failed:
+
+        async def fail(model=model):
+            attempts[model.version] = attempts.get(model.version, 0) + 1
+            raise RuntimeError(f"retained cleanup {model.version}")
+
+        monkeypatch.setattr(model, "unload", fail)
+    try:
+        for model in failed:
+            with pytest.raises(RuntimeError, match="retained cleanup"):
+                await registry.unload_version(model.name, model.version)
+        with pytest.raises(RuntimeError, match="retained cleanup"):
+            await registry.unload(healthy.name)
+        assert healthy_cleaned.is_set()
+        assert not healthy.ready
+        with pytest.raises(ModelNotFound):
+            await registry.get_models(healthy.name)
+        owners = registry._models[healthy.name]._cleanup_tasks
+        assert set(owners) == set(failed)
+        assert all(attempts[model.version] == 2 for model in failed)
+        assert all(task.done() and task.exception() for task in owners.values())
+    finally:
+        for model in failed:
+            monkeypatch.setattr(model, "unload", SumModel.unload.__get__(model))
+        if healthy.name in registry._models:
+            await registry.unload(healthy.name)
+    assert await registry.get_models() == []
+
+
+async def test_unload_all_waits_for_preparation_before_independent_cleanup(
+    sum_model_settings, monkeypatch
+):
+    registry = MultiModelRegistry(model_operation_timeout=5)
+    settings = sum_model_settings.model_copy(deep=True)
+    settings.parameters.version = "2"
+    healthy = await registry.load(settings)
+    settings = settings.model_copy(deep=True)
+    settings.parameters.version = "1"
+    partial = SumModel(settings)
+    entered, release, partial_cleaned, healthy_cleaned = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+
+    async def load():
+        entered.set()
+        await release.wait()
+        return True
+
+    async def fail():
+        partial_cleaned.set()
+        raise RuntimeError("retained settled cleanup")
+
+    async def clean():
+        healthy_cleaned.set()
+        return True
+
+    monkeypatch.setattr(partial, "load", load)
+    monkeypatch.setattr(partial, "unload", fail)
+    monkeypatch.setattr(healthy, "unload", clean)
+    registry._models[healthy.name]._model_initialiser = lambda _: partial
+    registry._model_operation_timeout = 0.05
+    attempt = asyncio.create_task(registry.load(settings))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(attempt), 5)
+        with pytest.raises(asyncio.TimeoutError):
+            await registry.unload(healthy.name)
+        assert not healthy_cleaned.is_set()
+        assert not partial_cleaned.is_set()
+        assert await registry.get_model(healthy.name, healthy.version) is healthy
+        assert healthy.ready
+        release.set()
+        await asyncio.wait_for(partial_cleaned.wait(), 5)
+        registry._model_operation_timeout = 5
+        with pytest.raises(RuntimeError, match="retained settled cleanup"):
+            await registry.unload(healthy.name)
+        assert healthy_cleaned.is_set()
+    finally:
+        release.set()
+        await asyncio.gather(attempt, return_exceptions=True)
+        monkeypatch.setattr(partial, "unload", SumModel.unload.__get__(partial))
+        registry._model_operation_timeout = 5
+        if healthy.name in registry._models:
+            await registry.unload(healthy.name)
