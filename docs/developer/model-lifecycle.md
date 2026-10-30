@@ -45,6 +45,10 @@ acknowledgement before restoring surviving workers to routing. Per-message UUIDs
 keep late responses separate from later operations. Retired frontend instances
 cannot issue a second unload against a newer committed instance.
 
+Worker unload updates target an exact version, including an unversioned instance.
+If that attempted instance is absent, cleanup is a no-op; it cannot select a
+healthy versioned default. Public versionless unload still selects the default.
+
 A failed rollback or unacknowledged unload leaves the pool quarantined, with its
 failure retained and reported by subsequent mutations. Close remains available.
 An already dispatched operation which never settles remains owned and quarantined

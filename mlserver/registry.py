@@ -381,10 +381,26 @@ class SingleModelRegistry:
         updated, since a model that fails to unload cleanly is still removed
         from the active registry.
         """
-        current = self._find_model(version)
+        await self._unload_version(version, rollback, exact=False)
+
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def _unload_exact_version(
+        self, version: str | None, rollback: bool = False
+    ) -> None:
+        # Worker updates already identify the frontend's selected version.
+        # An absent unversioned attempt must not select a versioned default.
+        await self._unload_version(version, rollback, exact=True)
+
+    async def _unload_version(
+        self, version: str | None, rollback: bool, exact: bool
+    ) -> None:
+        current = (
+            self._find_exact_version(version) if exact else self._find_model(version)
+        )
         cleanup_version = current.version if current else version
         cleanup_models = None
-        if current is not None or version is not None:
+        if exact or current is not None or version is not None:
             cleanup_models = [
                 model
                 for model in self._cleanup_tasks
@@ -395,6 +411,10 @@ class SingleModelRegistry:
             return
         if rollback:
             model = self._pending_reload.get(version or "")
+            if model is None:
+                return
+        elif exact:
+            model = self._find_exact_version(version)
             if model is None:
                 return
         else:
@@ -696,6 +716,23 @@ class MultiModelRegistry:
         finally:
             # If single model registry is empty after unload version failure
             # remove it from the multi model registry
+            if model_registry.empty():
+                del self._models[name]
+
+    @with_operation_lock(
+        lambda self, model_settings, *args, **kwargs: self._get_operation_lock(
+            model_settings.name
+        )
+    )
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def _unload_exact_version(
+        self, model_settings: ModelSettings, rollback: bool = False
+    ) -> None:
+        name = model_settings.name
+        model_registry = self._get_model_registry(name, model_settings.version)
+        try:
+            await model_registry._unload_exact_version(model_settings.version, rollback)
+        finally:
             if model_registry.empty():
                 del self._models[name]
 

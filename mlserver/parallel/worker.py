@@ -241,8 +241,8 @@ class Worker(Process):
                 await self._model_registry.load(model_settings, True)
             elif update.update_type == ModelUpdateType.Unload:
                 try:
-                    await self._model_registry.unload_version(
-                        model_settings.name, model_settings.version, update.rollback
+                    await self._model_registry._unload_exact_version(
+                        model_settings, update.rollback
                     )
                 except ModelNotFound:
                     # Model not present on worker - idempotent operation

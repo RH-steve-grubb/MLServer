@@ -7,7 +7,10 @@ import pytest
 
 from mlserver.parallel.errors import NoWorkersAvailable
 from mlserver.parallel.pool import InferencePool
+from mlserver.parallel.messages import ModelRequestMessage
 from mlserver.registry import MultiModelRegistry
+from mlserver.settings import ModelSettings, ModelParameters
+from tests.fixtures import ErrorModel
 
 
 async def test_timeout_quarantines_until_rollback(
@@ -225,3 +228,126 @@ async def test_incomplete_extraction_is_not_reused_after_owner_exit(
     (directory / ".mlserver-extraction-incomplete").touch()
     with pytest.raises(RuntimeError, match="incomplete extraction"):
         await registry._extract_tarball("incomplete", "unused")
+
+
+async def assert_worker_models(pool, model):
+    # Address every actual process explicitly; frontend metadata is cached and
+    # round-robin sampling alone would not establish which worker was checked.
+    for worker in list(pool._workers.values()):
+        request = ModelRequestMessage(
+            model_name=model.name, model_version=model.version, method_name="metadata"
+        )
+        worker.send_request(request)
+        response = await asyncio.wait_for(
+            pool._dispatcher._async_responses.schedule_and_wait(request, worker), 5
+        )
+        metadata = response.return_value
+        assert metadata.name == model.name
+        assert metadata.versions == model.settings.versions
+        assert metadata.platform == model.settings.platform
+
+
+@pytest.mark.parametrize(
+    "old_version,failed_version",
+    [("1", None), ("1", "2"), (None, "2"), (None, None), ("1", "1")],
+)
+async def test_failed_load_preserves_every_committed_worker(
+    settings, sum_model_settings, old_version, failed_version
+):
+    settings.model_operation_timeout = 10
+    pool = InferencePool(settings)
+    registry = MultiModelRegistry(
+        on_model_load=[pool.load_model],
+        on_model_unload=[pool.unload_model],
+        model_operation_timeout=10,
+    )
+    committed = sum_model_settings.model_copy(deep=True)
+    committed.parameters.version = old_version
+    try:
+        old = await registry.load(committed)
+        unrelated_settings = committed.model_copy(deep=True)
+        unrelated_settings.name = "unrelated-version-control"
+        unrelated = await registry.load(unrelated_settings)
+        failing = ModelSettings(
+            name=old.name,
+            implementation=ErrorModel,
+            parameters=ModelParameters(version=failed_version, load_error=True),
+        )
+        with pytest.raises(Exception):
+            await registry.load(failing)
+        await asyncio.wait_for(pool._settle_recovery(), 10)
+        assert await registry.get_model(old.name, old.version) is old
+        assert old.ready
+        assert pool.has_model(old.settings)
+        assert len(pool._dispatcher._ready_workers) == 2
+        await assert_worker_models(pool, old)
+        await assert_worker_models(pool, unrelated)
+    finally:
+        await pool.close()
+
+
+@pytest.mark.parametrize("outcome", ["error", "late-success", "late-failure"])
+async def test_unversioned_partial_load_preserves_versioned_workers(
+    settings, sum_model_settings, tmp_path, outcome
+):
+    settings.model_operation_timeout = 10
+    pool = InferencePool(settings, on_worker_load=[controlled_worker_load])
+    registry = MultiModelRegistry(
+        on_model_load=[pool.load_model],
+        on_model_unload=[pool.unload_model],
+        model_operation_timeout=10,
+    )
+    workers = list(pool._workers.values())
+    attempt = None
+    try:
+        committed = sum_model_settings.model_copy(deep=True)
+        committed.parameters.version = "1"
+        old = await registry.load(committed)
+        unrelated_settings = committed.model_copy(deep=True)
+        unrelated_settings.name = "unrelated-partial-control"
+        unrelated = await registry.load(unrelated_settings)
+        incoming = committed.model_copy(deep=True)
+        incoming.parameters.version = None
+        incoming.platform = "abandoned-unversioned-platform"
+        incoming.parameters.extra["lifecycle_barrier"] = str(tmp_path)
+        if outcome != "error":
+            registry._model_operation_timeout = 0.5
+        attempt = asyncio.create_task(registry.load(incoming))
+        await asyncio.wait_for(
+            wait_until(lambda: len(list(tmp_path.glob("entered-*"))) == 2), 5
+        )
+        first, second = workers
+        (tmp_path / f"release-{first.pid}").touch()
+        await asyncio.wait_for(
+            wait_until(lambda: len(pool._dispatcher._async_responses._futures) == 1), 5
+        )
+        if outcome != "error":
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(attempt), 5)
+            with pytest.raises(NoWorkersAvailable):
+                pool._dispatcher._get_worker()
+        if outcome != "late-success":
+            (tmp_path / f"fail-{second.pid}").touch()
+        (tmp_path / f"release-{second.pid}").touch()
+        if outcome == "error":
+            with pytest.raises(Exception) as error:
+                await asyncio.wait_for(asyncio.shield(attempt), 10)
+            assert not isinstance(error.value, asyncio.TimeoutError)
+        await asyncio.wait_for(pool._settle_recovery(), 10)
+        assert await registry.get_model(old.name) is old
+        assert old.ready
+        assert list(pool._worker_registry.models) == [old.settings, unrelated.settings]
+        assert len(pool._dispatcher._ready_workers) == 2
+        await assert_worker_models(pool, old)
+        await assert_worker_models(pool, unrelated)
+        registry._model_operation_timeout = 10
+        current = await registry.load(committed.model_copy(deep=True))
+        assert current.ready
+        await assert_worker_models(pool, current)
+    finally:
+        for worker in workers:
+            (tmp_path / f"release-{worker.pid}").touch()
+        if attempt is not None:
+            await asyncio.gather(attempt, return_exceptions=True)
+        await pool.close()
+        assert all(not worker.is_alive() for worker in workers)

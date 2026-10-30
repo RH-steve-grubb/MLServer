@@ -381,3 +381,25 @@ async def test_stopped_dispatcher_does_not_restart_failed_reader(responses, mock
     dispatcher._process_responses_cb(task)
     start.assert_not_called()
     await dispatcher.stop()
+
+
+async def test_cancel_after_response_resolution_is_queued():
+    from mlserver.parallel.dispatcher import AsyncResponses
+
+    responses = AsyncResponses()
+    worker = cast(Worker, SimpleNamespace(pid=12345))
+    message = ModelResponseMessage()
+    future = responses._schedule(message, worker)
+    loop = asyncio.get_running_loop()
+    errors = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _, context: errors.append(context))
+    try:
+        responses.resolve(message)
+        # Exercise the handoff race, after resolve queued its loop callback.
+        future.cancel()
+        await asyncio.sleep(0)
+        assert not errors
+    finally:
+        responses._clear_message(message.id)
+        loop.set_exception_handler(previous)
