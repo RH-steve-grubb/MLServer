@@ -254,6 +254,19 @@ class InferencePool:
         # Jitter before spawning: rate-limits rapid fork cycles and guarantees
         # a lock-free window so operator unloads can break a crash loop
         await asyncio.sleep(random.uniform(0.5, 2.0))
+        if self._closing:
+            return
+        if self._staged or self._recovery_task is not None:
+            # The dependency may outlast worker initialization's deadline.
+            # Transfer the obligation to another retained owner; do not turn
+            # dependency expiry into a dropped replacement or a busy retry.
+            task = create_task_independent(self._finish_restart())
+            self._restart_tasks.add(task)
+            task.add_done_callback(self._restart_tasks.discard)
+            return
+        await self._finish_restart()
+
+    async def _finish_restart(self) -> None:
         try:
             await self._start_worker()
         except Exception:
@@ -262,17 +275,27 @@ class InferencePool:
                 exc_info=True,
             )
 
-    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    async def _start_worker(self) -> Worker | None:
+        # Wait without the pool lock: lifecycle completion may need that lock.
+        # Recheck after acquisition because new preparation can arrive meanwhile.
+        while not self._closing:
+            if self._staged:
+                await asyncio.gather(
+                    *[asyncio.shield(f) for f in self._staged.values()]
+                )
+            await self._settle_recovery()
+            async with self._operation_lock:
+                if self._closing:
+                    return None
+                if self._staged or self._recovery_task is not None:
+                    continue
+                return await self._initialize_worker()
+        return None
+
     @defer_cancellation(
         lambda self, *args, **kwargs: self._settings.worker_start_timeout
     )
-    async def _start_worker(self) -> Worker | None:
-        # Do not start a worker if the pool is closing
-        if self._closing:
-            return None
-        if self._staged:
-            await asyncio.gather(*[asyncio.shield(f) for f in self._staged.values()])
-        await self._settle_recovery()
+    async def _initialize_worker(self) -> Worker | None:
         if self._closing:
             return None
         worker = _spawn_worker(
@@ -287,15 +310,25 @@ class InferencePool:
         # Phase 1/2 replay runs inside the dispatcher lock via on_worker_start
         # to ensure no concurrent dispatch_update can reach the replacement
         # worker in an inconsistent state during initialization
+        replay = self._replay_worker(worker)
         try:
-            await self._dispatcher.on_worker_start(worker, self._replay_worker(worker))
+            await self._dispatcher.on_worker_start(worker, replay)
         except (Exception, asyncio.CancelledError):
             # Replay can fail through an operation error, timeout, or
             # cancellation. In every case the replacement worker is not safe
             # to publish as ready.
-            self._dispatcher.on_worker_stop(worker, -1)
             assert worker.pid is not None
+            registered = worker.pid in self._workers
+            self._dispatcher.on_worker_stop(worker, -1)
+            if self._closing and not registered and worker.exitcode is not None:
+                # Close may already have retired this worker. An existing
+                # failed cleanup owner stays retained; do not recreate one.
+                raise
             self._closing_workers[worker.pid] = worker
+            if self._closing:
+                # Close joins startup before its final sweep. Transfer this
+                # owner rather than racing its stop and queue retirement.
+                raise
             worker.kill()
             await asyncio.to_thread(
                 worker.join, self._settings.parallel_workers_timeout
@@ -310,6 +343,10 @@ class InferencePool:
                 else:
                     self._closing_workers.pop(worker.pid, None)
             raise
+        finally:
+            # A deadline while waiting for dispatcher registration may leave
+            # replay unawaited. Startup has settled, so it cannot run later.
+            replay.close()
 
         if not self._closing:
             self._dispatcher.on_worker_ready(worker)
@@ -317,7 +354,10 @@ class InferencePool:
                 f"New worker with PID {worker.pid} on {self.name} is now ready."
             )
         else:
-            worker.kill()
+            assert worker.pid is not None
+            if worker.pid in self._workers or worker.exitcode is None:
+                self._closing_workers[worker.pid] = worker
+            self._dispatcher.on_worker_stop(worker, -1)
             return None
         return worker
 
@@ -574,6 +614,11 @@ class InferencePool:
     async def close(self) -> None:
         if self._close_task is None:
             self._closing = True
+            # Dependency/lock waiters have not accepted native initialization.
+            # Accepted initialization retains its existing deferred cancellation
+            # boundary and completes (or times out) before this owner joins it.
+            for task in list(self._restart_tasks):
+                task.cancel()
             for model in list(self._staged):
                 self._release_stage(model)
             self._close_task = create_task_independent(self._close())
@@ -650,13 +695,30 @@ class InferencePool:
                 cleanup_errors.append(error)
         if self._restart_tasks:
             results = await asyncio.gather(*self._restart_tasks, return_exceptions=True)
-            cleanup_errors.extend(r for r in results if isinstance(r, BaseException))
+            cleanup_errors.extend(
+                r
+                for r in results
+                if isinstance(r, BaseException)
+                and not isinstance(r, asyncio.CancelledError)
+            )
+        if self._closing_workers:
+            # Startup may register after the first sweep (for example while
+            # waiting for the dispatcher lock). No restart can spawn now;
+            # collect transferred owners with the same bounded exit checks.
+            try:
+                await self._close_workers()
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
 
         # The pool is terminal after close. No model state can be replayed or
         # rolled back, so release the tracking references after cleanup.
         self._worker_registry.clear()
         self._pending_reload.clear()
 
+        if self._closing_workers:
+            cleanup_errors.append(
+                RuntimeError("Worker cleanup remains owned after restart settlement")
+            )
         if cleanup_errors:
             # Track cleanup failures
             self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
@@ -680,12 +742,13 @@ class InferencePool:
             # parent queue retirement are confirmed. A kill is only a request.
             self._dispatcher.on_worker_stop(worker, -1)
             try:
-                await asyncio.wait_for(
-                    worker.stop(), self._settings.parallel_workers_timeout
-                )
-                await asyncio.to_thread(
-                    worker.join, self._settings.parallel_workers_timeout
-                )
+                if worker.exitcode is None:
+                    await asyncio.wait_for(
+                        worker.stop(), self._settings.parallel_workers_timeout
+                    )
+                    await asyncio.to_thread(
+                        worker.join, self._settings.parallel_workers_timeout
+                    )
             except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
             try:
@@ -697,7 +760,7 @@ class InferencePool:
                 if worker.exitcode is None:
                     raise RuntimeError(f"Worker {pid} has not confirmed exit")
                 await worker.retire_queues(self._settings.parallel_workers_timeout)
-                del self._closing_workers[pid]
+                self._closing_workers.pop(pid, None)
             except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
                 continue

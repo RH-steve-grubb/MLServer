@@ -93,6 +93,15 @@ Awaited nested operations retain the existing shared timeout. Extension authors
 spawning detached lifecycle work must give it an independent boundary and retain
 its owner; inheriting a nested context does not create independent ownership.
 
+Restart obligations wait for staged publication and recovery outside the pool
+lock and initialization deadline. Actual spawn/replay retains its configured
+deadline and is attempted once; failure is logged without an automatic retry
+loop. Close cancels pending dependency/lock waiters and joins accepted startup,
+retaining any unresolved worker owner instead of allowing late publication.
+After startup settles, a final bounded sweep collects children which registered
+after the first sweep. Close preserves earlier cleanup failures even if this
+additional sweep succeeds.
+
 If a killed worker leaves the response reader blocked, dispatcher shutdown reports
 that reader as unrecoverable after a bounded thread join and retains the owner.
 Python cannot forcibly terminate such a thread. This change does not add a policy
