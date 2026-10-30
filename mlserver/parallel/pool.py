@@ -228,7 +228,16 @@ class InferencePool:
         finally:
             # The child has already been reaped by the SIGCHLD handler. Clean
             # up the parent-side queue resources before discarding the worker.
-            worker.close_queues()
+            self._closing_workers[pid] = worker
+            try:
+                await worker.retire_queues(self._settings.parallel_workers_timeout)
+            except Exception:
+                logger.error(
+                    f"Queue cleanup for worker {pid} remains owned until close",
+                    exc_info=True,
+                )
+            else:
+                self._closing_workers.pop(pid, None)
 
             # Restart independently of the signal handler and its inherited
             # timeout context. Keep each owner until its result is observed.
@@ -294,8 +303,12 @@ class InferencePool:
             if worker.exitcode is None:
                 logger.error(f"Replay worker {worker.pid} has not confirmed exit")
             else:
-                worker.close_queues()
-                self._closing_workers.pop(worker.pid, None)
+                try:
+                    await worker.retire_queues(self._settings.parallel_workers_timeout)
+                except Exception:
+                    logger.error("Replay worker queue cleanup failed", exc_info=True)
+                else:
+                    self._closing_workers.pop(worker.pid, None)
             raise
 
         if not self._closing:
@@ -649,8 +662,8 @@ class InferencePool:
         cleanup_errors: list[BaseException] = []
         self._closing_workers.update(self._workers)
         for pid, worker in list(self._closing_workers.items()):
-            # Quarantine first, but keep a resource-owning reference until exit
-            # has actually been observed. A kill request is not confirmation.
+            # Quarantine first, retaining the owner until process exit and
+            # parent queue retirement are confirmed. A kill is only a request.
             self._dispatcher.on_worker_stop(worker, -1)
             try:
                 await asyncio.wait_for(
@@ -669,7 +682,7 @@ class InferencePool:
                     )
                 if worker.exitcode is None:
                     raise RuntimeError(f"Worker {pid} has not confirmed exit")
-                worker.close_queues()
+                await worker.retire_queues(self._settings.parallel_workers_timeout)
                 del self._closing_workers[pid]
             except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)

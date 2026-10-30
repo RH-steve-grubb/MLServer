@@ -97,3 +97,9 @@ survives precommit failure. Publication retires both displaced instances and giv
 each a cleanup owner before awaiting either; cleanup failure preserves publication.
 Hooks must finalize the worker-visible identity before worker preparation;
 renaming a worker model after dispatch is outside this ownership contract.
+
+Confirmed worker exit releases child resources but does not settle parent queue
+writers. Pool shutdown and worker retirement close obsolete parent readers only
+after exit, then join each feeder with a bound before releasing its owner. A feeder
+which cannot stop remains owned and reported. This also prevents interpreter-exit
+queue finalizers from silently waiting on a dead consumer.

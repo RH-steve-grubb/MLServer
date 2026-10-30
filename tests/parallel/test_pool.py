@@ -301,6 +301,7 @@ async def test_start_worker_waits_for_load_lock(
     worker.join = lambda _timeout: None
     worker.exitcode = 0
     worker.close_queues = lambda: None
+    worker.retire_queues = lambda _timeout: stop_worker()
 
     async def controlled_dispatch(_message):
         dispatch_started.set()
@@ -462,6 +463,7 @@ async def test_start_worker_cancellation_settles_startup(
     worker.join = lambda _timeout: None
     worker.exitcode = 0
     worker.close_queues = lambda: None
+    worker.retire_queues = lambda _timeout: stop_worker()
 
     async def controlled_replay(_worker):
         replay_started.set()
@@ -489,6 +491,7 @@ async def test_start_worker_replay_failure_kills_replacement(
     worker.kill = mocker.Mock()
     worker.exitcode = 0
     worker.close_queues = lambda: None
+    worker.retire_queues = lambda _timeout: stop_worker()
 
     async def stop_worker():
         return None

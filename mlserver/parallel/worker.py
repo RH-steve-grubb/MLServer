@@ -62,6 +62,10 @@ class Worker(Process):
             self._zmq_request_endpoint = create_endpoint(Path(reply[6:]).parent, "q")
         self._requests: Queue[ModelRequestMessage] = Queue()
         self._model_updates: Queue[ModelUpdateMessage] = Queue()
+        for queue in [self._requests, self._model_updates]:
+            # WorkerStop reports delivery failures. After confirmed consumer
+            # exit, retirement deliberately breaks obsolete blocked writes.
+            setattr(queue, "_ignore_epipe", True)
         self._env = env
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
@@ -285,6 +289,32 @@ class Worker(Process):
         """Close this worker's parent-side queues."""
         self._model_updates.close()
         self._requests.close()
+
+    async def retire_queues(self, timeout: float) -> None:
+        """Release parent-side writers only after the consumer has exited."""
+        if self.exitcode is None:
+            raise RuntimeError("Cannot retire queues before confirmed worker exit")
+        self.close_queues()
+        failures = []
+        for queue in [self._requests, self._model_updates]:
+            try:
+                # Queue.close() alone only queues a sentinel behind buffered
+                # data. A dead consumer cannot drain a full pipe. Closing its
+                # obsolete parent reader releases any blocked feeder write.
+                getattr(queue, "_reader").close()
+                thread = getattr(queue, "_thread", None)
+                if thread is not None:
+                    await asyncio.to_thread(thread.join, timeout)
+                    if thread.is_alive():
+                        raise RuntimeError(
+                            f"Queue writer for worker {self.pid} has not exited"
+                        )
+                getattr(queue, "_writer").close()
+            except Exception as error:
+                logger.error("Failed to retire worker queue", exc_info=True)
+                failures.append(error)
+        if failures:
+            raise failures[0]
 
     async def stop(self):
         """
