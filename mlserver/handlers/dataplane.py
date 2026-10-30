@@ -1,9 +1,11 @@
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from dataclasses import dataclass
+from time import perf_counter
 from prometheus_client import (
     Counter,
     Summary,
 )
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 
 from ..model import MLModel
 from ..errors import ModelNotReady
@@ -23,6 +25,13 @@ from ..cloudevents import CloudEventsMiddleware
 from ..utils import generate_uuid
 
 
+@dataclass
+class _InferenceMetrics:
+    enabled: bool = True
+    excluded_duration: float = 0.0
+    inference_succeeded: bool = False
+
+
 class DataPlane:
     """
     Internal implementation of handlers, used by both the gRPC and REST
@@ -32,9 +41,16 @@ class DataPlane:
     the readiness check reports not ready.
     """
 
-    def __init__(self, settings: Settings, model_registry: MultiModelRegistry):
+    def __init__(
+        self,
+        settings: Settings,
+        model_registry: MultiModelRegistry,
+        *,
+        inference_metrics: bool = True,
+    ):
         self._settings = settings
         self._model_registry = model_registry
+        self._inference_metrics_enabled = inference_metrics
         self._startup_complete = False
         self._inference_middleware = InferenceMiddlewares(
             CloudEventsMiddleware(settings)
@@ -200,6 +216,15 @@ class DataPlane:
     def _prepare_payload(
         self, payload: InferenceRequest, model: MLModel
     ) -> InferenceRequest:
+        if self._settings.grpc_raw_input_buffers and (
+            model.settings.max_batch_size or model.settings.max_batch_time
+        ):
+            from ..grpc.buffers import restore_list_inputs
+
+            # Batching merges the public list representation. Keep compact
+            # NumPy buffers on the measured unbatched path, while preserving
+            # the existing batching contract without changing the batcher.
+            restore_list_inputs(payload)
         if payload.id is None:
             payload.id = generate_uuid()
 
@@ -227,26 +252,52 @@ class DataPlane:
             payload = self._prepare_payload(payload, model)
             yield payload
 
+    @contextmanager
+    def _infer_metrics(
+        self, name: str, version: str | None
+    ) -> Iterator[_InferenceMetrics]:
+        # Raw REST learns whether the body is valid from the worker's reply.
+        # Defer recording until that is known; schema errors never entered the
+        # standard DataPlane and must not become inference failures here.
+        observation = _InferenceMetrics(enabled=self._inference_metrics_enabled)
+        started = perf_counter()
+        try:
+            yield observation
+        except BaseException as error:
+            # Match count_exceptions(): caller cancellation is not an inference
+            # failure, but a completed timing observation still belongs to it.
+            if observation.enabled:
+                if observation.inference_succeeded:
+                    self._ModelInferRequestSuccess.labels(
+                        model=name, version=version
+                    ).inc()
+                elif isinstance(error, Exception):
+                    self._ModelInferRequestFailure.labels(
+                        model=name, version=version
+                    ).inc()
+            raise
+        else:
+            if observation.enabled:
+                self._ModelInferRequestSuccess.labels(model=name, version=version).inc()
+        finally:
+            if observation.enabled:
+                elapsed = max(
+                    0.0, perf_counter() - started - observation.excluded_duration
+                )
+                self._ModelInferRequestDuration.labels(
+                    model=name, version=version
+                ).observe(elapsed)
+
     @asynccontextmanager
     async def _infer_contextmanager(
         self,
         name: str,
         version: str | None = None,
     ) -> AsyncIterator[MLModel]:
-
-        infer_duration = self._ModelInferRequestDuration.labels(
-            model=name, version=version
-        ).time()
-        infer_errors = self._ModelInferRequestFailure.labels(
-            model=name, version=version
-        ).count_exceptions()
-
-        with infer_duration, infer_errors:
+        with self._infer_metrics(name, version):
             model = await self._model_registry.get_model(name, version)
             if not model.ready:
                 raise ModelNotReady(name, version)
 
             with model_context(model.settings):
                 yield model
-
-            self._ModelInferRequestSuccess.labels(model=name, version=version).inc()

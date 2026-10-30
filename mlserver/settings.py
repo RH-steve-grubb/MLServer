@@ -13,6 +13,7 @@ from functools import lru_cache
 from typing import (
     Any,
     ClassVar,
+    Literal,
     no_type_check,
     TYPE_CHECKING,
 )
@@ -351,6 +352,12 @@ class Settings(BaseSettings):
     """When parallel inference is enabled, number of workers to run inference
     across."""
 
+    parallel_inference_transport: Literal["queue", "zmq"] = "queue"
+    """Inference IPC transport; ZeroMQ requires the optional ``zmq`` extra.
+
+    Model-control messages retain multiprocessing queues in either mode.
+    """
+
     parallel_workers_timeout: int = 5
     """Grace timeout to wait until the workers shut down when stopping MLServer."""
 
@@ -455,6 +462,13 @@ class Settings(BaseSettings):
     http_port: int = 8080
     """Port where to listen for HTTP / REST connections."""
 
+    rest_worker_json: bool = False
+    """Parse and encode unary REST inference JSON in parallel model workers.
+
+    Nonparallel models, adaptive batching and other media types retain local
+    request preparation. Generate and streaming routes are unchanged.
+    """
+
     root_path: str = ""
     """Set the ASGI root_path for applications submounted below a given URL path."""
 
@@ -463,6 +477,13 @@ class Settings(BaseSettings):
 
     grpc_max_message_length: int | None = None
     """Maximum length (i.e. size) of gRPC payloads."""
+
+    grpc_raw_input_buffers: bool = False
+    """Preserve raw FP32 buffers for unary gRPC and NumPy-compatible runtimes.
+
+    Enable only for runtimes whose input codecs accept NumPy-backed data.
+    Streaming and unsupported input representations retain normal conversion.
+    """
 
     # CORS settings
     cors_settings: CORSSettings | None = None

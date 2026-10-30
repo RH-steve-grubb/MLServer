@@ -42,19 +42,15 @@ This means that we can get full access to the underlying hardware.
 
 Managing the Inter-Process Communication (IPC) between the main MLServer
 process and the inference pool workers brings in some overhead.
-Under the hood, MLServer uses the `multiprocessing` library to implement the
-distributed processing management, which has been shown to offer the smallest
-possible overhead when implementating these type of distributed strategies
-{cite}`zhiFiberPlatformEfficient2020`.
+MLServer manages worker processes through `multiprocessing` and uses
+`multiprocessing.Queue` for inference messages by default. The optional ZeroMQ
+transport changes inference IPC while retaining queues for model control.
+Both transports serialize requests and responses. See
+[Inference Performance Options](./performance.md) for configuration and the
+related REST and gRPC conversion options.
 
-The extra overhead introduced by other libraries is usually brought in as a
-trade off in exchange of other advanced features for complex distributed
-processing scenarios.
-However, MLServer's use case is simple enough to not require any of these.
-
-Despite the above, even though this overhead is minimised, this **it can still
-be particularly noticeable for lightweight inference methods**, where the extra
-IPC overhead can take a large percentage of the overall time.
+IPC overhead can be **particularly noticeable for lightweight inference
+methods**, where it can take a large percentage of the overall time.
 In these cases (which can only be assessed on a model-by-model basis), the user
 has the option to [disable the parallel inference feature](#usage).
 
@@ -78,9 +74,3 @@ The expected values are:
 - `N`, where `N > 0`, will create a pool of `N` workers.
 - `0`, will disable the parallel inference feature.
   In other words, inference will happen within the main MLServer process.
-
-## References
-
-```{bibliography}
-:filter: docname in docnames
-```

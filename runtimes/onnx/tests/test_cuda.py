@@ -38,8 +38,8 @@ def _has_cuda() -> bool:
         )
         model_proto.ir_version = 7
         model_bytes = model_proto.SerializeToString()
-        ort.InferenceSession(model_bytes, providers=["CUDAExecutionProvider"])
-        return True
+        session = ort.InferenceSession(model_bytes, providers=["CUDAExecutionProvider"])
+        return "CUDAExecutionProvider" in session.get_providers()
     except Exception:
         return False
 

@@ -315,6 +315,83 @@ parallelism:
 - `inter_op_num_threads`: Number of threads to parallelize execution across
   independent nodes in the graph. Useful for models with parallel branches.
 
+### CUDA Graph Replay and Blocking Waits
+
+Two model settings under `parameters.extra` control CUDA execution:
+
+| Setting | Default | Environment variable |
+| --- | --- | --- |
+| `cuda_graph` | `false` | `MLSERVER_MODEL_ONNX_CUDA_GRAPH` |
+| `cuda_blocking_sync` | `false` | `MLSERVER_MODEL_ONNX_CUDA_BLOCKING_SYNC` |
+
+For example, enable both in `model-settings.json`:
+
+```json
+{
+  "name": "my-onnx-model",
+  "implementation": "mlserver_onnx.OnnxModel",
+  "max_batch_size": 0,
+  "max_batch_time": 0,
+  "parameters": {
+    "uri": "./model.onnx",
+    "extra": {
+      "providers": ["CUDAExecutionProvider", "CPUExecutionProvider"],
+      "provider_options": [{"device_id": 0}, {}],
+      "cuda_graph": true,
+      "cuda_blocking_sync": true
+    }
+  }
+}
+```
+
+The CUDA runtime and required CUDA/cuDNN libraries must be available in the
+serving environment. Blocking waits locate `libcudart` through the
+`nvidia-cuda-runtime-cu12` package or the system library loader. Both settings
+require `CUDAExecutionProvider` to be first and active; model loading fails if
+those requirements are not met. Model values in `parameters.extra` override
+the corresponding environment variables. For example,
+`MLSERVER_MODEL_ONNX_CUDA_GRAPH=true` enables replay for ONNX models unless
+overridden in their model settings.
+
+`cuda_graph` captures and replays GPU execution using persistent device buffers
+to reduce host launch work. This path requires exactly one fixed-shape FP32
+input and fixed-shape FP32 outputs. Requests must supply contiguous FP32 input
+matching the model shape, and custom `run_options` are unsupported. The example
+disables adaptive batching so request shapes remain fixed. Each request still
+uploads its current input and downloads outputs to CPU memory. Sessions retain
+device buffers, including one for every output, in each worker. Concurrent
+calls to the same session serialize access to those buffers.
+
+`cuda_blocking_sync` selects blocking host waits on the configured CUDA device.
+It can be enabled independently of graph replay and may reduce CPU spent waiting
+for the GPU. This wait policy belongs to the device context in the serving
+process, so other models sharing that context can observe it. Unloading a model
+does not reset the policy; restart the affected process to restore default waits.
+
+Benchmark each option with your model and request concurrency. Throughput,
+latency, CPU use and GPU memory can change independently. Server-side request
+and transport settings are described in
+[Inference Performance Options](../../docs/user-guide/performance.md).
+
+#### Validating CUDA execution
+
+From the repository root, run the GPU validation suite serially:
+
+```bash
+poetry run tox -c runtimes/onnx -e cuda-ci
+```
+
+This environment installs the locked GPU dependencies and NVIDIA libraries with
+Poetry. It requires an NVIDIA driver compatible with CUDA 12. The launcher sets
+the native library search path before starting pytest. Real-device tests cover
+graph capture/replay, changed request contents, independent response buffers,
+and blocking synchronization, both separately and together.
+
+`cuda-ci` uses `--require-cuda`: missing CUDA coverage or skipped CUDA tests fail
+the run. The existing `cuda` environment retains automatic skips for CPU-only
+hosts. The `cuda-ci` command is ready for a GPU runner; it is not yet wired into
+the GitHub Actions workflow.
+
 ### Graph Optimization
 
 Enable graph optimizations to improve inference speed:

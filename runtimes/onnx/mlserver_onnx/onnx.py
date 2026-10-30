@@ -1,4 +1,11 @@
+"""ONNX serving with optional CUDA execution policies.
+
+Blocking synchronization is shared by sessions on a process/device context:
+https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__DRIVER.html
+"""
+
 import logging
+from typing import Any
 
 import onnx
 import numpy as np
@@ -16,6 +23,8 @@ from mlserver.types import (
 )
 from mlserver.settings import ModelSettings
 from mlserver.utils import get_model_uri
+from .cuda import CudaGraphSession
+from .cuda_sync import configure_blocking_sync, read_device_flags
 from .settings import OnnxSettings, get_onnx_settings
 from .utils import (
     PREDICT_OUTPUT,
@@ -44,6 +53,7 @@ class OnnxModel(MLModel):
     def __init__(self, settings: ModelSettings):
         super().__init__(settings)
         self._onnx_settings = get_onnx_settings(self.settings)
+        self._cuda_wait_policy: dict[str, Any] | None = None
 
     def _configure_framework_logger(self) -> None:
         """Store ORT log severity for session creation in load().
@@ -93,7 +103,51 @@ class OnnxModel(MLModel):
         session_options = _apply_session_config_entries(
             session_options, self._onnx_settings
         )
-        self._run_options = _build_run_options(self._onnx_settings)
+        cuda_device_id = 0
+        if self._onnx_settings.cuda_graph or self._onnx_settings.cuda_blocking_sync:
+            if providers[0] != "CUDAExecutionProvider":
+                raise ModelLoadError(
+                    "CUDA graph replay and blocking synchronization require "
+                    "CUDAExecutionProvider first"
+                )
+            # Provider dictionaries may belong to model settings. Copy before
+            # applying CUDA policies so loading does not rewrite model settings.
+            provider_options = [
+                dict(options)
+                for options in (
+                    provider_options
+                    if provider_options is not None
+                    else [{} for _ in providers]
+                )
+            ]
+            cuda_options = provider_options[0]
+            device = cuda_options.get("device_id", 0)
+            if type(device) is not int and not isinstance(device, str):
+                raise ModelLoadError("CUDA device_id must be a non-negative integer")
+            try:
+                cuda_device_id = int(device)
+            except ValueError as exc:
+                raise ModelLoadError(
+                    "CUDA device_id must be a non-negative integer"
+                ) from exc
+            if cuda_device_id < 0:
+                raise ModelLoadError("CUDA device_id must be a non-negative integer")
+            if self._onnx_settings.cuda_graph:
+                if self._onnx_settings.run_options:
+                    raise ModelLoadError(
+                        "cuda_graph does not support configured RunOptions"
+                    )
+                if str(cuda_options.get("enable_cuda_graph", "1")) != "1":
+                    raise ModelLoadError(
+                        "cuda_graph requires provider enable_cuda_graph=1"
+                    )
+                cuda_options["enable_cuda_graph"] = "1"
+        if self._onnx_settings.cuda_graph:
+            # An empty RunOptions mapping requests defaults. The graph session
+            # uses its fixed binding path and accepts only the default None.
+            self._run_options = None
+        else:
+            self._run_options = _build_run_options(self._onnx_settings)
         logger.debug(
             "ONNX runtime options for model '%s': providers=%s, provider_options=%s, "
             "session_options=%s, run_options=%s",
@@ -104,14 +158,45 @@ class OnnxModel(MLModel):
             self._run_options,
         )
 
+        self._cuda_wait_policy = None
         try:
             model = onnx.load(model_uri, load_external_data=True)
             model_bytes = model.SerializeToString()
-            self._model = ort.InferenceSession(
+            wait = (
+                configure_blocking_sync(cuda_device_id)
+                if self._onnx_settings.cuda_blocking_sync
+                else None
+            )
+            session = ort.InferenceSession(
                 model_bytes,
                 sess_options=session_options,
                 providers=providers,
                 provider_options=provider_options,
+            )
+            if wait is not None:
+                actual = session.get_providers()
+                if not actual or actual[0] != "CUDAExecutionProvider":
+                    raise ModelLoadError(
+                        "CUDA blocking synchronization requires an active CUDA provider"
+                    )
+                actual_options = session.get_provider_options()["CUDAExecutionProvider"]
+                if str(actual_options.get("device_id")) != str(cuda_device_id):
+                    raise ModelLoadError("CUDA session uses a different device")
+                self._cuda_wait_policy = {
+                    **wait,
+                    "after_session_flags": read_device_flags(
+                        wait["library"], cuda_device_id
+                    ),
+                }
+                logger.debug(
+                    "CUDA wait policy for model '%s': %s",
+                    self.name,
+                    self._cuda_wait_policy,
+                )
+            self._model = (
+                CudaGraphSession(session, cuda_device_id)
+                if self._onnx_settings.cuda_graph
+                else session
             )
         except Exception as exc:
             raise ModelLoadError(
@@ -279,9 +364,12 @@ class OnnxModel(MLModel):
 
     async def unload(self) -> bool:
         """Release the loaded model and clear runtime state."""
-        if getattr(self, "_model", None):
-            del self._model
+        # The graph session is the sole owner of its binding and device buffers;
+        # dropping it releases them together with the underlying ORT session.
         self._model = None
+        # Only drop our receipt. Resetting context flags could change the wait
+        # policy of other models still using the same process/device context.
+        self._cuda_wait_policy = None
         self._onnx_settings = None
         self._input_names = []
         self._output_names = []

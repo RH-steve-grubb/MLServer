@@ -79,6 +79,7 @@ jobs:
         tox-env:
           - mlserver-conda
           - mlserver-venv
+          - mlserver-venv-zmq
         is-pr:
           - ${{ github.event_name == 'pull_request' }}
         exclude:
@@ -172,7 +173,6 @@ jobs:
 
   # Ensure that having all the runtimes installed together works
   test-all-runtimes:
-    if: github.event_name == 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -183,6 +183,14 @@ jobs:
         tox-env:
           - all-runtimes-conda
           - all-runtimes-venv
+          - all-runtimes-venv-zmq
+        is-pr:
+          - ${{ github.event_name == 'pull_request' }}
+        exclude:
+          # Keep the existing push-only conda policy; both venv variants run
+          # before merge on every supported Python version.
+          - is-pr: true
+            tox-env: all-runtimes-conda
     runs-on: ${{ matrix.os }}
     steps:
       - name: Maximize build space
@@ -239,3 +247,27 @@ jobs:
             source ./hack/activate-libomp-macos.sh
           fi
           poetry run tox -e ${{ matrix.tox-env }}
+
+  test-results:
+    name: Test results
+    if: ${{ always() }}
+    needs: [generate, lint, test-mlserver, test-runtimes, test-all-runtimes]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every test matrix to succeed
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          results = json.loads(os.environ["JOB_RESULTS"])
+          failed = {
+              name: job["result"]
+              for name, job in results.items()
+              if job["result"] != "success"
+          }
+          if failed:
+              raise SystemExit(f"Required jobs did not succeed: {failed}")
+          PY
