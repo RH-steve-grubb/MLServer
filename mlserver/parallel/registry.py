@@ -7,11 +7,13 @@ from collections.abc import Sequence
 from ..settings import ModelSettings
 from ..utils import to_absolute_path
 from ..model import MLModel
+from ..utils import defer_cancellation, with_operation_lock
+from weakref import WeakValueDictionary
 from ..settings import Settings
 from ..env import Environment, compute_hash_of_file, compute_hash_of_string
 from ..registry import model_initialiser
 
-from .errors import EnvironmentNotFound
+from .errors import EnvironmentNotFound, InferencePoolUnavailable
 from .logging import logger
 from .pool import InferencePool, InferencePoolHook
 from .worker import WorkerModelHook
@@ -24,8 +26,7 @@ def _set_environment_hash(model: MLModel, env_hash: str | None):
 
 
 def _get_environment_hash(model: MLModel) -> str | None:
-    # No default — AttributeError signals the model was never dispatched to a
-    # pool (i.e. pool creation failed before _set_environment_hash was called)
+    # No default — AttributeError signals that pool identity was not resolved.
     return getattr(model, ENV_HASH_ATTR)
 
 
@@ -61,10 +62,14 @@ class InferencePoolRegistry:
         on_worker_unload: Sequence[WorkerModelHook] = [],
     ):
         self._settings = settings
+        self._operation_locks: WeakValueDictionary[str | None, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
+        self._closing = False
         self._on_worker_stop = on_worker_stop
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
-        self._default_pool = InferencePool(
+        self._default_pool: InferencePool | None = InferencePool(
             self._settings,
             on_worker_stop=on_worker_stop,
             on_worker_load=on_worker_load,
@@ -97,7 +102,8 @@ class InferencePoolRegistry:
                 try:
                     # Notify all pools since we don't know which pool owns
                     # this PID — each pool checks internally
-                    await self._default_pool.on_worker_stop(pid, exit_code)
+                    if self._default_pool is not None:
+                        await self._default_pool.on_worker_stop(pid, exit_code)
                     await asyncio.gather(
                         *[
                             pool.on_worker_stop(pid, exit_code)
@@ -176,6 +182,8 @@ class InferencePoolRegistry:
 
         if not env_tarball:
             if not inference_pool_gid:
+                if self._default_pool is None:
+                    raise InferencePoolUnavailable("default inference pool")
                 return self._default_pool
             if inference_pool_gid not in self._pools:
                 self._pools[inference_pool_gid] = InferencePool(
@@ -227,6 +235,8 @@ class InferencePoolRegistry:
 
         if not env_hash:
             if not inference_pool_gid:
+                if self._default_pool is None:
+                    raise InferencePoolUnavailable("default inference pool")
                 return self._default_pool
             else:
                 return self._pools[inference_pool_gid]
@@ -284,7 +294,46 @@ class InferencePoolRegistry:
         # main process.
         return MLModel(model_settings)
 
+    async def _get_pool_lock(
+        self, model: MLModel, *, loading: bool = False
+    ) -> asyncio.Lock:
+        """Resolve pool identity and return its shared operation lock."""
+        if not self._should_load_model(model.settings):
+            # No pool resources are accessed for this no-op.
+            return asyncio.Lock()
+
+        parameters = model.settings.parameters
+        gid = parameters.inference_pool_gid if parameters else None
+        if loading:
+            env_hash = None
+            if parameters and parameters.environment_path:
+                path = os.path.abspath(
+                    os.path.expanduser(os.path.expandvars(parameters.environment_path))
+                )
+                env_hash = await compute_hash_of_string(path)
+            else:
+                tarball = _get_env_tarball(model)
+                if tarball:
+                    env_hash = await compute_hash_of_file(tarball)
+            if env_hash is not None and gid is not None:
+                env_hash = _append_gid_environment_hash(env_hash, gid)
+        else:
+            try:
+                env_hash = _get_environment_hash(model)
+            except AttributeError:
+                # Unload will treat an unresolved pool identity as a no-op.
+                return asyncio.Lock()
+
+        key = env_hash if env_hash is not None else gid or None
+        return self._operation_locks.setdefault(key, asyncio.Lock())
+
+    @with_operation_lock(lambda self, model: self._get_pool_lock(model, loading=True))
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.model_operation_timeout
+    )
     async def load_model(self, model: MLModel) -> MLModel:
+        if self._closing:
+            raise InferencePoolUnavailable()
         if not self._should_load_model(model.settings):
             # Skip load if model has disabled parallel workers
             return model
@@ -306,7 +355,13 @@ class InferencePoolRegistry:
         _set_environment_hash(loaded, pool.env_hash)
         return loaded
 
+    @with_operation_lock(lambda self, model: self._get_pool_lock(model))
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.model_operation_timeout
+    )
     async def unload_model(self, model: MLModel) -> MLModel:
+        if self._closing:
+            raise InferencePoolUnavailable()
         if not self._should_load_model(model.settings):
             # Skip unload if model has disabled parallel workers
             return model
@@ -341,6 +396,12 @@ class InferencePoolRegistry:
             await self._close_pool(pool.pool_gid)
 
     async def close(self):
+        if self._closing:
+            return
+        self._closing = True
+        for lock in list(self._operation_locks.values()):
+            async with lock:
+                pass
         # Reset signal handler
         signal.signal(signal.SIGCHLD, self._original_sigchld_handler)
         # Best effort cleanup - closure attempted for all pools and
@@ -356,7 +417,7 @@ class InferencePoolRegistry:
 
     async def _close_pool(self, env_hash: str | None = None):
         pool: InferencePool | None = self._default_pool
-        if env_hash:
+        if env_hash is not None:
             pool = self._pools.get(env_hash)
         if pool is None:
             return
@@ -375,7 +436,9 @@ class InferencePoolRegistry:
         finally:
             # Always remove pool from registry,
             # cannot guarantee pool state at this point
-            if env_hash:
+            if env_hash is not None:
                 pool = self._pools.pop(env_hash, None)
                 if pool is not None:
                     pool._env = None  # pylint: disable=protected-access
+            else:
+                self._default_pool = None

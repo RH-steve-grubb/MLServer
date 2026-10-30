@@ -79,6 +79,26 @@ All REST endpoints live under the `/v2` prefix and follow the V2 Inference Proto
 | POST | `/v2/repository/models/{model_name}/load` | Load model | `200` / `400` |
 | POST | `/v2/repository/models/{model_name}/unload` | Unload model | `200` / `400` |
 
+#### Repository index request
+
+The repository index request supports the standard `ready` field and the
+MLServer-specific `include_registry_models` extension:
+
+```json
+{
+  "ready": false,
+  "include_registry_models": false
+}
+```
+
+- `include_registry_models` defaults to `false`, so the index lists only
+  models discovered in the model repository.
+- When `true`, the index also includes currently registered models in the
+  model registry, including models that are absent from the repository.
+- When `ready` is `true`, only `READY` models from the selected set are
+  returned. When `ready` is omitted or `false`, all selected models and their
+  current states are returned.
+
 ### Documentation Endpoints
 
 | Method | Path | Description |
@@ -198,7 +218,7 @@ All REST endpoints live under the `/v2` prefix and follow the V2 Inference Proto
 **Request:**
 ```json
 {
-  "ready": true
+  "ready": false
 }
 ```
 
@@ -419,8 +439,8 @@ class MyModel(MLModel):
 | `parallel_workers_timeout` | int | `5` | Worker shutdown grace timeout (seconds) |
 | `model_repository_root` | string | `.` | Path to model repository |
 | `load_models_at_startup` | bool | `true` | Auto-load models on start |
-| `strict_readiness` | bool | `true` | Require ALL models ready for server readiness |
-| `empty_registry_readiness` | bool | `true` | Report ready when no models are loaded |
+| `strict_readiness` | bool | `true` | If true, all models in the registry must be ready. If false, model readiness is ignored after startup; an empty registry follows `empty_registry_readiness` |
+| `empty_registry_readiness` | bool | `true` | Report ready when no models are in the registry (both readiness modes) |
 | `gzip_enabled` | bool | `true` | Enable GZip compression |
 | `log_level` | string | `INFO` | Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) |
 | `access_log` | bool | `true` | Enable REST/gRPC access logging |
@@ -432,12 +452,14 @@ class MyModel(MLModel):
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `allow_origins` | string[] | `[]` | Allowed CORS origins |
-| `allow_origin_regex` | string | null | Regex for allowed origins |
+| `allow_origins` | string[] | `[]` | Explicitly allowed CORS origins; the `*` wildcard origin is rejected |
 | `allow_credentials` | bool | `false` | Allow cookies in CORS |
 | `allow_methods` | string[] | `["GET"]` | Allowed HTTP methods |
 | `allow_headers` | string[] | `[]` | Allowed request headers |
 | `max_age` | int | `600` | Browser CORS cache TTL (seconds) |
+
+`allow_origin_regex` is not supported. Replace it with an explicit
+`allow_origins` list. Wildcard origins are rejected.
 
 ### Model Settings (`model-settings.json`)
 

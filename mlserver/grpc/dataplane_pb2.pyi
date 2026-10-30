@@ -1225,22 +1225,34 @@ class RepositoryIndexRequest(google.protobuf.message.Message):
 
     REPOSITORY_NAME_FIELD_NUMBER: builtins.int
     READY_FIELD_NUMBER: builtins.int
+    INCLUDE_REGISTRY_MODELS_FIELD_NUMBER: builtins.int
     repository_name: builtins.str
     """The name of the repository. If empty the index is returned
     for all repositories.
     """
     ready: builtins.bool
     """If true return only models currently ready for inferencing."""
+    include_registry_models: builtins.bool
+    """MLServer-specific extension. Defaults to false. If true, include all
+    currently registered models, including models absent from the repository.
+    If ready is true, only READY models from the selected set are returned.
+    """
     def __init__(
         self,
         *,
         repository_name: builtins.str = ...,
         ready: builtins.bool = ...,
+        include_registry_models: builtins.bool = ...,
     ) -> None: ...
     def ClearField(
         self,
         field_name: typing.Literal[
-            "ready", b"ready", "repository_name", b"repository_name"
+            "include_registry_models",
+            b"include_registry_models",
+            "ready",
+            b"ready",
+            "repository_name",
+            b"repository_name",
         ],
     ) -> None: ...
 

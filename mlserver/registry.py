@@ -8,9 +8,11 @@ from prometheus_client import Counter
 
 from .context import model_context
 from .model import MLModel
+from .utils import defer_cancellation, with_operation_lock
+from weakref import WeakValueDictionary
 from .errors import ModelNotFound
 from .logging import logger
-from .settings import ModelSettings
+from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .metrics.context import SELDON_MODEL_NAME_LABEL, SELDON_MODEL_VERSION_LABEL
 
 from mlserver.errors import ModelLoadError, ModelUnloadError
@@ -101,7 +103,9 @@ class SingleModelRegistry:
         on_model_load: Sequence[ModelRegistryHook] = [],
         on_model_unload: Sequence[ModelRegistryHook] = [],
         model_initialiser: ModelInitialiser = model_initialiser,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
     ):
+        self._operation_lock = asyncio.Lock()
         self._versions: dict[str, MLModel] = {}
         self._pending_reload: dict[str, MLModel] = {}
         self._default: MLModel | None = None
@@ -110,6 +114,7 @@ class SingleModelRegistry:
         self._on_model_load = on_model_load
         self._on_model_unload = on_model_unload
         self._model_initialiser = model_initialiser
+        self._model_operation_timeout = model_operation_timeout
 
     @property
     def default(self) -> MLModel | None:
@@ -169,6 +174,8 @@ class SingleModelRegistry:
         self._default = self._find_default()
         return self._default
 
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def load(
         self, model_settings: ModelSettings, parallel: bool = False
     ) -> MLModel:
@@ -251,7 +258,9 @@ class SingleModelRegistry:
 
         return model
 
-    async def unload(self):
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def unload(self) -> None:
         """
         Unload all versions of this model. Always a fresh unload — never called
         as part of a reload operation. Best-effort — all versions are attempted
@@ -281,7 +290,11 @@ class SingleModelRegistry:
             self._versions.clear()
             self._clear_default()
 
-    async def unload_version(self, version: str | None = None, rollback: bool = False):
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def unload_version(
+        self, version: str | None = None, rollback: bool = False
+    ) -> None:
         """
         Unload a specific version of the model.
 
@@ -440,34 +453,27 @@ class MultiModelRegistry:
         on_model_load: Sequence[ModelRegistryHook] = [],
         on_model_unload: Sequence[ModelRegistryHook] = [],
         model_initialiser: ModelInitialiser = model_initialiser,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
     ):
+        # Locks outlive registry entries while any owner or waiter holds them.
+        self._operation_locks: WeakValueDictionary[str, asyncio.Lock] = (
+            WeakValueDictionary()
+        )
         self._models: dict[str, SingleModelRegistry] = {}
         self._on_model_load = on_model_load
         self._on_model_unload = on_model_unload
         self._model_initialiser = model_initialiser
-        self._startup_complete = False
+        self._model_operation_timeout = model_operation_timeout
 
-    @property
-    def is_startup_complete(self) -> bool:
-        """
-        Check if startup load phase has completed.
+    def _get_operation_lock(self, name: str) -> asyncio.Lock:
+        return self._operation_locks.setdefault(name, asyncio.Lock())
 
-        Returns False until _startup_complete is set to True,
-        regardless of model states. This prevents race conditions
-        where the registry is empty during initial startup.
-        """
-        return self._startup_complete
-
-    def startup_complete(self) -> None:
-        """
-        Mark that the initial server startup phase has completed.
-
-        This should only be called by the server's main startup process
-        after all initial models have been loaded. Once called, the registry
-        will report as startup-complete for readiness checks.
-        """
-        self._startup_complete = True
-
+    @with_operation_lock(
+        lambda self, model_settings, *args, **kwargs: self._get_operation_lock(
+            model_settings.name
+        )
+    )
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def load(
         self, model_settings: ModelSettings, parallel: bool = False
     ) -> MLModel:
@@ -486,6 +492,7 @@ class MultiModelRegistry:
                 on_model_load=self._on_model_load,
                 on_model_unload=self._on_model_unload,
                 model_initialiser=self._model_initialiser,
+                model_operation_timeout=self._model_operation_timeout,
             )
         try:
             return await self._models[model_settings.name].load(
@@ -500,7 +507,9 @@ class MultiModelRegistry:
                 del self._models[model_settings.name]
             raise
 
-    async def unload(self, name: str):
+    @with_operation_lock(lambda self, name: self._get_operation_lock(name))
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def unload(self, name: str) -> None:
         """
         Unload all versions of a model and remove it from the registry.
         Always a fresh unload — never called as part of a reload operation.
@@ -515,9 +524,13 @@ class MultiModelRegistry:
             # unload regardless of success (models removed before actual unload)
             del self._models[name]
 
+    @with_operation_lock(
+        lambda self, name, *args, **kwargs: self._get_operation_lock(name)
+    )
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def unload_version(
         self, name: str, version: str | None = None, rollback: bool = False
-    ):
+    ) -> None:
         """
         Unload a specific version of a model. Removes the
         :class:`SingleModelRegistry` if it becomes empty after the unload.

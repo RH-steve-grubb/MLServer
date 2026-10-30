@@ -14,7 +14,7 @@ from mlserver.errors import (
 from mlserver.registry import MultiModelRegistry, SingleModelRegistry, model_initialiser
 from mlserver.settings import ModelSettings, ModelParameters
 
-from .fixtures import SlowModel
+from .fixtures import SlowModel, SumModel
 
 
 @pytest.fixture
@@ -84,12 +84,47 @@ async def test_model_hooks(
         callback.assert_called_once_with(sum_model)  # type: ignore[attr-defined]
 
 
-async def test_reload_model(
-    model_registry: MultiModelRegistry, sum_model_settings: ModelSettings
+async def test_load_propagates_model_operation_timeout_to_single_registry(
+    sum_model_settings: ModelSettings,
 ):
-    existing_model = await model_registry.get_model(sum_model_settings.name)
-    new_model = await model_registry.load(sum_model_settings)
+    model_operation_timeout = 37
+    model_registry = MultiModelRegistry(model_operation_timeout=model_operation_timeout)
 
+    try:
+        await model_registry.load(sum_model_settings)
+
+        single_registry = model_registry._models[sum_model_settings.name]
+        assert single_registry._model_operation_timeout == model_operation_timeout
+    finally:
+        await model_registry.unload(sum_model_settings.name)
+
+
+async def test_reload_model(
+    model_registry: MultiModelRegistry,
+    sum_model_settings: ModelSettings,
+    mocker,
+):
+    # Test rolling reload
+    sum_model_settings.implementation = SlowModel
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_load(model: SlowModel) -> bool:
+        started.set()
+        await release.wait()
+        return True
+
+    mocker.patch.object(SlowModel, "load", new=controlled_load)
+    existing_model = await model_registry.get_model(sum_model_settings.name)
+    reload_task = asyncio.create_task(model_registry.load(sum_model_settings))
+    await started.wait()
+
+    models = list(await model_registry.get_models())
+    assert all(model.ready for model in models)
+    assert len(models) == 1
+
+    release.set()
+    new_model = await reload_task
     reloaded_model = await model_registry.get_model(sum_model_settings.name)
     assert new_model != existing_model
     assert new_model == reloaded_model
@@ -101,6 +136,8 @@ async def test_reload_model(
 
     for callback in model_registry._on_model_unload:
         callback.assert_called_once_with(existing_model)  # type: ignore[attr-defined]
+
+    await model_registry.unload(sum_model_settings.name)
 
 
 async def test_load_multi_version(
@@ -290,26 +327,487 @@ async def test_load_error_with_cleanup_failure_preserves_original_error(
         await registry.get_model()
 
 
-async def test_rolling_reload(
-    model_registry: MultiModelRegistry, sum_model_settings: ModelSettings
+async def test_cancelled_load_settles_and_marks_model_ready(
+    model_registry: MultiModelRegistry, mocker
+):
+    slow_model_settings = ModelSettings(name="slow-model", implementation=SlowModel)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_load(model: SlowModel) -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(SlowModel, "load", new=controlled_load)
+
+    load_task = asyncio.create_task(model_registry.load(slow_model_settings))
+    await started.wait()
+
+    models = list(await model_registry.get_models())
+    assert not all([m.ready for m in models])
+    assert len(models) == 2
+    slow_model = await model_registry.get_model(slow_model_settings.name)
+    assert not slow_model.ready
+
+    # Cancellation is deferred after the load has started.
+    load_task.cancel()
+    await asyncio.sleep(0)
+    assert not load_task.done()
+    finish.set()
+
+    await load_task
+
+    loaded_model = await model_registry.get_model(slow_model_settings.name)
+    assert loaded_model.ready
+    await model_registry.unload(slow_model_settings.name)
+
+
+async def test_cancelled_reload_settles_and_replaces_model(
+    model_registry: MultiModelRegistry, sum_model_settings: ModelSettings, mocker
 ):
     sum_model_settings.implementation = SlowModel
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_load(model: SlowModel) -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(SlowModel, "load", new=controlled_load)
+    old_model = await model_registry.get_model(sum_model_settings.name)
     reload_task = asyncio.create_task(model_registry.load(sum_model_settings))
-    # Use asyncio.sleep() to give control back to loop so that the load above
-    # starts to get executed
-    await asyncio.sleep(0.1)
+    await started.wait()
 
-    # Assert that the old model stays ready while the new version is getting loaded
-    models = list(await model_registry.get_models())
-    assert all([m.ready for m in models])
-    assert len(models) == 1
-
-    # Cancel slow reload task
+    # Cancellation is deferred after the replacement load has started.
     reload_task.cancel()
+    await asyncio.sleep(0)
+    assert not reload_task.done()
+    finish.set()
+
+    await reload_task
+
+    new_model = await model_registry.get_model(sum_model_settings.name)
+    assert new_model is not old_model
+    assert new_model.ready
+    assert not old_model.ready
+    await model_registry.unload(sum_model_settings.name)
+
+
+async def test_unload_cancellation_settles_and_removes_model(
+    model_registry: MultiModelRegistry, sum_model: MLModel, mocker
+):
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_unload() -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(sum_model, "unload", side_effect=controlled_unload)
+    unload_task = asyncio.create_task(model_registry.unload(sum_model.name))
+    await started.wait()
+
+    unload_task.cancel()
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    finish.set()
+
+    await unload_task
+
+    with pytest.raises(ModelNotFound):
+        await model_registry.get_model(sum_model.name)
+
+
+async def test_unload_version_cancellation_settles_and_removes_model(
+    model_registry: MultiModelRegistry, sum_model: MLModel, mocker
+):
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_unload() -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(sum_model, "unload", side_effect=controlled_unload)
+    unload_task = asyncio.create_task(
+        model_registry.unload_version(sum_model.name, sum_model.version)
+    )
+    await started.wait()
+
+    unload_task.cancel()
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    finish.set()
+
+    await unload_task
+
+    with pytest.raises(ModelNotFound):
+        await model_registry.get_model(sum_model.name)
+
+
+async def test_single_model_registry_load_cancellation_settles(
+    sum_model_settings: ModelSettings, mocker
+):
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_load(model: MLModel) -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(SumModel, "load", new=controlled_load)
+    registry = SingleModelRegistry(sum_model_settings)
+    load_task = asyncio.create_task(registry.load(sum_model_settings))
+    await started.wait()
+    loading_model = await registry.get_model()
+    assert not loading_model.ready
+
+    load_task.cancel()
+    await asyncio.sleep(0)
+    assert not load_task.done()
+    finish.set()
+
+    await load_task
+
+    model = await registry.get_model()
+    assert model.ready
+    await registry.unload()
+
+
+async def test_single_model_registry_reload_cancellation_settles(
+    sum_model_settings: ModelSettings, mocker
+):
+    registry = SingleModelRegistry(sum_model_settings)
+    old_model = await registry.load(sum_model_settings)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_load(model: MLModel) -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(SumModel, "load", new=controlled_load)
+    reload_task = asyncio.create_task(registry.load(sum_model_settings))
+    await started.wait()
+
+    assert (await registry.get_model()) is old_model
+    assert old_model.ready
+
+    reload_task.cancel()
+    await asyncio.sleep(0)
+    assert not reload_task.done()
+    finish.set()
+
+    await reload_task
+
+    new_model = await registry.get_model()
+    assert new_model is not old_model
+    assert new_model.ready
+    assert not old_model.ready
+    await registry.unload()
+
+
+async def test_single_model_registry_unload_cancellation_settles(
+    sum_model_settings: ModelSettings, mocker
+):
+    registry = SingleModelRegistry(sum_model_settings)
+    model = await registry.load(sum_model_settings)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_unload() -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(model, "unload", side_effect=controlled_unload)
+    unload_task = asyncio.create_task(registry.unload())
+    await started.wait()
+
+    unload_task.cancel()
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    finish.set()
+
+    await unload_task
+
+    assert registry.empty()
+
+
+async def test_single_model_registry_unload_version_cancellation_settles(
+    sum_model_settings: ModelSettings, mocker
+):
+    registry = SingleModelRegistry(sum_model_settings)
+    model = await registry.load(sum_model_settings)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def controlled_unload() -> bool:
+        started.set()
+        await finish.wait()
+        return True
+
+    mocker.patch.object(model, "unload", side_effect=controlled_unload)
+    unload_task = asyncio.create_task(registry.unload_version(model.version))
+    await started.wait()
+
+    unload_task.cancel()
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+    finish.set()
+
+    await unload_task
+
+    assert registry.empty()
+
+
+async def test_model_registry_allows_independent_names(
+    sum_model_settings: ModelSettings,
+):
+    active = 0
+    maximum_active = 0
+    entered = 0
+    release = asyncio.Event()
+    both_entered = asyncio.Event()
+
+    async def load_hook(model: MLModel) -> MLModel:
+        nonlocal active, maximum_active, entered
+        entered += 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if entered == 2:
+            both_entered.set()
+        await release.wait()
+        active -= 1
+        return model
+
+    registry = MultiModelRegistry(on_model_load=[load_hook])
+    first_settings = sum_model_settings.model_copy(deep=True)
+    first_settings.name = "first-name"
+    second_settings = sum_model_settings.model_copy(deep=True)
+    second_settings.name = "second-name"
+
+    first_load = asyncio.create_task(registry.load(first_settings))
+    second_load = asyncio.create_task(registry.load(second_settings))
+    await both_entered.wait()
+    assert maximum_active == 2
+    release.set()
     try:
-        await reload_task
-    except CancelledError:
-        pass
+        await asyncio.gather(first_load, second_load)
+    finally:
+        await asyncio.gather(
+            registry.unload("first-name"),
+            registry.unload("second-name"),
+        )
+
+
+async def test_model_registry_serializes_load_for_same_name(
+    sum_model_settings: ModelSettings,
+):
+    active = 0
+    maximum_active = 0
+    entered = 0
+    first_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def load_hook(model: MLModel) -> MLModel:
+        nonlocal active, maximum_active, entered
+        entered += 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if entered == 1:
+            first_entered.set()
+        await release.wait()
+        active -= 1
+        return model
+
+    same_name_registry = MultiModelRegistry(on_model_load=[load_hook])
+    first_settings = sum_model_settings.model_copy(deep=True)
+    first_settings.name = "same-name"
+    assert first_settings.parameters is not None
+    first_settings.parameters.version = "v1"
+    second_settings = first_settings.model_copy(deep=True)
+    assert second_settings.parameters is not None
+    second_settings.parameters.version = "v2"
+
+    first_load = asyncio.create_task(same_name_registry.load(first_settings))
+    await first_entered.wait()
+    second_load = asyncio.create_task(same_name_registry.load(second_settings))
+    await asyncio.sleep(0)
+    assert entered == 1
+    assert maximum_active == 1
+    release.set()
+    try:
+        await asyncio.gather(first_load, second_load)
+    finally:
+        await same_name_registry.unload("same-name")
+
+
+async def test_model_registry_serializes_load_and_unload_for_same_name(
+    sum_model_settings: ModelSettings,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+
+    async def load_hook(model: MLModel) -> MLModel:
+        load_started.set()
+        await release_load.wait()
+        return model
+
+    registry = MultiModelRegistry(on_model_load=[load_hook])
+    settings = sum_model_settings.model_copy(deep=True)
+    settings.name = "load-unload-model"
+
+    load_task = asyncio.create_task(registry.load(settings))
+    await load_started.wait()
+    unload_task = asyncio.create_task(registry.unload(settings.name))
+    await asyncio.sleep(0)
+
+    assert not unload_task.done()
+    release_load.set()
+    loaded_model, _ = await asyncio.gather(load_task, unload_task)
+
+    assert loaded_model.ready is False
+    with pytest.raises(ModelNotFound):
+        await registry.get_model(settings.name)
+
+
+async def test_model_registry_serializes_load_and_unload_version_for_same_name(
+    sum_model_settings: ModelSettings,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+
+    async def load_hook(model: MLModel) -> MLModel:
+        load_started.set()
+        await release_load.wait()
+        return model
+
+    registry = MultiModelRegistry(on_model_load=[load_hook])
+    settings = sum_model_settings.model_copy(deep=True)
+    settings.name = "load-unload-version-model"
+
+    load_task = asyncio.create_task(registry.load(settings))
+    await load_started.wait()
+    unload_task = asyncio.create_task(
+        registry.unload_version(settings.name, settings.version)
+    )
+    await asyncio.sleep(0)
+
+    assert not unload_task.done()
+    release_load.set()
+    loaded_model, _ = await asyncio.gather(load_task, unload_task)
+
+    assert loaded_model.ready is False
+    with pytest.raises(ModelNotFound):
+        await registry.get_model(settings.name)
+
+
+async def test_single_model_registry_serializes_loads(
+    sum_model_settings: ModelSettings,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+    entered = 0
+    active = 0
+    maximum_active = 0
+
+    async def load_hook(model: MLModel) -> MLModel:
+        nonlocal active, entered, maximum_active
+        entered += 1
+        active += 1
+        maximum_active = max(maximum_active, active)
+        if entered == 1:
+            load_started.set()
+        await release_load.wait()
+        active -= 1
+        return model
+
+    registry = SingleModelRegistry(
+        sum_model_settings,
+        on_model_load=[load_hook],
+    )
+
+    first_load = asyncio.create_task(registry.load(sum_model_settings))
+    await load_started.wait()
+    second_load = asyncio.create_task(registry.load(sum_model_settings))
+    await asyncio.sleep(0)
+
+    assert entered == 1
+    assert maximum_active == 1
+    assert not second_load.done()
+
+    release_load.set()
+    await asyncio.gather(first_load, second_load)
+
+    assert maximum_active == 1
+    await registry.unload()
+
+
+async def test_single_model_registry_serializes_load_and_unload(
+    sum_model_settings: ModelSettings,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+
+    async def load_hook(model: MLModel) -> MLModel:
+        load_started.set()
+        await release_load.wait()
+        return model
+
+    registry = SingleModelRegistry(
+        sum_model_settings,
+        on_model_load=[load_hook],
+    )
+
+    load_task = asyncio.create_task(registry.load(sum_model_settings))
+    await load_started.wait()
+    unload_task = asyncio.create_task(registry.unload())
+    await asyncio.sleep(0)
+
+    assert not unload_task.done()
+    release_load.set()
+    loaded_model, _ = await asyncio.gather(load_task, unload_task)
+
+    assert loaded_model.ready is False
+    assert registry.empty()
+
+
+async def test_single_model_registry_serializes_load_and_unload_version(
+    sum_model_settings: ModelSettings,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+
+    async def load_hook(model: MLModel) -> MLModel:
+        load_started.set()
+        await release_load.wait()
+        return model
+
+    registry = SingleModelRegistry(
+        sum_model_settings,
+        on_model_load=[load_hook],
+    )
+
+    load_task = asyncio.create_task(registry.load(sum_model_settings))
+    await load_started.wait()
+    unload_task = asyncio.create_task(
+        registry.unload_version(sum_model_settings.version)
+    )
+    await asyncio.sleep(0)
+
+    assert not unload_task.done()
+    release_load.set()
+    loaded_model, _ = await asyncio.gather(load_task, unload_task)
+
+    assert loaded_model.ready is False
+    assert registry.empty()
 
 
 def test_model_initialiser_wraps_runtime_allowlist_value_error():

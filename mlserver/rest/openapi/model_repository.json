@@ -128,6 +128,11 @@
         "properties": {
           "ready": {
             "type": "boolean"
+          },
+          "include_registry_models": {
+            "type": "boolean",
+            "default": false,
+            "description": "MLServer extension; include registry models when true."
           }
         }
       },
@@ -186,8 +191,7 @@
   },
   "tags": [
     {
-      "name": "extension",
-      "description": "MLServer-specific extensions to the V2 Inference Protocol"
+      "name": "extension"
     },
     {
       "name": "model"

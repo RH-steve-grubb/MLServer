@@ -28,6 +28,18 @@ class NoWorkersAvailable(MLServerError):
         super().__init__(msg, status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
+class InferencePoolUnavailable(MLServerError):
+    """Raised when an inference pool or pool registry is shutting down."""
+
+    def __init__(self, pool_name: str | None = None):
+        if pool_name is None:
+            msg = "All inference pools are shutting down"
+        else:
+            msg = f"The {pool_name} is shutting down"
+
+        super().__init__(msg, status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
 class WorkerError(MLServerError):
     """
     Class used to wrap exceptions raised from the workers.

@@ -585,7 +585,7 @@ def test_settings_from_env_file(monkeypatch):
     assert settings.http_port == 9999
     assert settings.debug is True
 
-    assert cors_settings.allow_origin_regex == ".*"
+    assert cors_settings.allow_origins == ["https://app.example.com"]
     assert cors_settings.max_age == 999
 
     assert model_settings.name == "dummy-name"
@@ -1087,6 +1087,16 @@ def test_model_settings_serialisation():
     as_dict["implementation"] == expected
 
 
+@pytest.mark.parametrize(
+    ("version", "expected_version"),
+    [(None, None), ("", None), ("v1", "v1")],
+)
+def test_model_parameters_normalizes_empty_version(version, expected_version):
+    parameters = ModelParameters(version=version)
+
+    assert parameters.version == expected_version
+
+
 def test_model_parameters_environment_tarball_blocked_in_production_mode():
     """Test that environment_tarball is rejected in PRODUCTION mode."""
     with pytest.raises(ValueError, match="environment_tarball is not allowed"):
@@ -1140,31 +1150,37 @@ def test_model_parameters_both_environments_allowed_in_development_mode(
     assert params.environment_path == "/path/to/env"
 
 
-def test_wildcard_cors_origins_blocked_in_production_mode():
-    """Test that wildcard CORS origins are rejected in PRODUCTION mode."""
+@pytest.mark.parametrize("mode", ["production_mode", "development_mode"])
+def test_wildcard_cors_origins_blocked(request, mode):
+    """Test that wildcard CORS origins are rejected."""
+    if mode == "development_mode":
+        request.getfixturevalue("development_mode")
+
     with pytest.raises(ValueError, match="Wildcard CORS origins"):
         Settings(cors_settings=CORSSettings(allow_origins=["*"]))
 
 
-def test_wildcard_cors_origins_in_list_blocked_in_production_mode():
+@pytest.mark.parametrize("mode", ["production_mode", "development_mode"])
+def test_wildcard_cors_origins_in_list_blocked(request, mode):
     """Test that wildcard CORS origins are rejected.
 
     This should work even when mixed with explicit origins.
     """
+    if mode == "development_mode":
+        request.getfixturevalue("development_mode")
+
     with pytest.raises(ValueError, match="Wildcard CORS origins"):
         Settings(
             cors_settings=CORSSettings(allow_origins=["https://app.example.com", "*"])
         )
 
 
-def test_cors_origin_regex_blocked_in_production_mode():
-    """Test that CORS origin regex patterns are rejected in PRODUCTION mode."""
-    with pytest.raises(ValueError, match="CORS origin regex patterns not allowed"):
-        Settings(cors_settings=CORSSettings(allow_origin_regex=".*"))
+@pytest.mark.parametrize("mode", ["production_mode", "development_mode"])
+def test_explicit_cors_origins_allowed(request, mode):
+    """Test that explicit CORS origins are allowed."""
+    if mode == "development_mode":
+        request.getfixturevalue("development_mode")
 
-
-def test_explicit_cors_origins_allowed_in_production_mode():
-    """Test that explicit CORS origins are allowed in PRODUCTION mode."""
     # Should not raise
     settings = Settings(
         cors_settings=CORSSettings(
@@ -1175,20 +1191,6 @@ def test_explicit_cors_origins_allowed_in_production_mode():
         "https://app.example.com",
         "https://dashboard.example.com",
     ]
-
-
-def test_wildcard_cors_origins_allowed_in_development_mode(development_mode):
-    """Test that wildcard CORS origins are allowed in DEVELOPMENT mode."""
-    # Should not raise
-    settings = Settings(cors_settings=CORSSettings(allow_origins=["*"]))
-    assert settings.cors_settings.allow_origins == ["*"]
-
-
-def test_cors_origin_regex_allowed_in_development_mode(development_mode):
-    """Test that CORS origin regex patterns are allowed in DEVELOPMENT mode."""
-    # Should not raise
-    settings = Settings(cors_settings=CORSSettings(allow_origin_regex=".*"))
-    assert settings.cors_settings.allow_origin_regex == ".*"
 
 
 def test_model_settings_custom_runtime_allowed_in_development_mode(development_mode):

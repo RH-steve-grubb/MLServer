@@ -119,6 +119,7 @@ class Worker(Process):
         self._model_registry = MultiModelRegistry(
             on_model_load=self._on_worker_load,
             on_model_unload=self._on_worker_unload,
+            model_operation_timeout=self._settings.model_operation_timeout,
         )
         self._active = True
         self._poller = select.poll()
@@ -270,12 +271,17 @@ class Worker(Process):
         """
         self._model_updates.put(model_update)
 
+    def close_queues(self):
+        """Close this worker's parent-side queues."""
+        self._model_updates.close()
+        self._requests.close()
+
     async def stop(self):
         """
         Close the worker's main loop.
         Note that this method should be both multiprocess- and thread-safe.
         """
         await terminate_queue(self._model_updates)
-        self._model_updates.close()
-        self._requests.close()
-        self._executor.shutdown()
+        self.close_queues()
+        if self.__executor is not None:
+            self.__executor.shutdown()

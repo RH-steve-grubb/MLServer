@@ -255,36 +255,52 @@ class TestOnnxBuildSessionOptions:
         assert isinstance(result, ort.SessionOptions)
         assert result.log_severity_level == ort.SessionOptions().log_severity_level
 
-    def test_applies_explicit_debug_severity(self):
+    def test_auto_sets_log_severity_from_mlserver_level(self):
+        from mlserver_onnx.onnx import OnnxModel
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
+        _set_mlserver_level(logging.DEBUG)
         settings = OnnxSettings(session_options=None)
-        result = _build_session_options(settings, log_severity=0)
+        result = _build_session_options(
+            settings, log_severity=OnnxModel(_make_settings())._ort_log_severity
+        )
         assert result.log_severity_level == 0  # DEBUG → 0
 
-    def test_applies_explicit_warning_severity(self):
+    def test_auto_sets_warning_severity(self):
+        from mlserver_onnx.onnx import OnnxModel
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
+        _set_mlserver_level(logging.WARNING)
         settings = OnnxSettings(session_options=None)
-        result = _build_session_options(settings, log_severity=2)
+        result = _build_session_options(
+            settings, log_severity=OnnxModel(_make_settings())._ort_log_severity
+        )
         assert result.log_severity_level == 2  # WARNING → 2
 
     def test_respects_user_supplied_log_severity(self):
+        from mlserver_onnx.onnx import OnnxModel
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
+        _set_mlserver_level(logging.DEBUG)
         settings = OnnxSettings(session_options={"log_severity_level": 4})
-        result = _build_session_options(settings, log_severity=0)
+        result = _build_session_options(
+            settings, log_severity=OnnxModel(_make_settings())._ort_log_severity
+        )
         assert result.log_severity_level == 4  # user override wins
 
-    def test_applies_severity_with_other_session_options(self):
+    def test_auto_sets_when_other_session_options_present(self):
+        from mlserver_onnx.onnx import OnnxModel
         from mlserver_onnx.settings import OnnxSettings
         from mlserver_onnx.utils import _build_session_options
 
+        _set_mlserver_level(logging.ERROR)
         settings = OnnxSettings(session_options={"inter_op_num_threads": 2})
-        result = _build_session_options(settings, log_severity=3)
+        result = _build_session_options(
+            settings, log_severity=OnnxModel(_make_settings())._ort_log_severity
+        )
         assert result.log_severity_level == 3  # ERROR → 3
         assert result.inter_op_num_threads == 2
 

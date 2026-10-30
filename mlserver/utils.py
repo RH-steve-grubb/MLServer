@@ -1,16 +1,29 @@
 import os
 import uuid
 import asyncio
+import inspect
 import urllib.parse
+from contextvars import ContextVar
 
 from asyncio import Task
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Any, ParamSpec, TypeVar
+from functools import wraps
 
 from .logging import logger
 from .types import InferenceRequest, InferenceResponse, Parameters
-from .settings import ModelSettings
+from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .errors import InvalidModelURI
 from .version import __version__
+
+
+T = TypeVar("T")
+P = ParamSpec("P")
+
+
+_deferred_cancellation_active: ContextVar[bool] = ContextVar(
+    "deferred_cancellation_active", default=False
+)
 
 
 async def get_model_uri(
@@ -148,3 +161,96 @@ def get_normalized_version(version: str | None = None) -> str:
     """
     resolved_version = version or __version__
     return resolved_version.split("+", 1)[0]
+
+
+async def _defer_cancellation(
+    operation: Awaitable[T], timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT
+) -> T:
+    """Wait for an operation to settle while deferring caller cancellation.
+
+    Caller cancellation is suppressed during the timeout window. If timeout expires,
+    the underlying operation is cancelled.
+
+    If the operation completes during the timeout window its result is returned or
+    any exception is raised. If timeout expires a ``TimeoutError`` is raised.
+    """
+    operation = asyncio.wait_for(operation, timeout)
+    task = asyncio.ensure_future(operation)
+    caller = asyncio.current_task()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # This helper intentionally defers caller cancellation. Catching
+            # CancelledError does not clear asyncio's recorded requests, so
+            # clear every pending request before the operation resumes. A
+            # task can receive one CancelledError after multiple cancel() calls.
+            if (
+                caller is not None
+                and hasattr(caller, "cancelling")
+                and hasattr(caller, "uncancel")
+            ):
+                while caller.cancelling():
+                    caller.uncancel()
+            continue
+    return task.result()
+
+
+def defer_cancellation(
+    timeout: float | Callable[..., float] = DEFAULT_MODEL_OPERATION_TIMEOUT,
+) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Coroutine[Any, Any, T]]]:
+    """Apply one timeout and deferred-cancellation boundary to an operation.
+
+    Nested decorated calls reuse the outer boundary and timeout.
+    ``timeout`` may be a value or a callable resolved at invocation time.
+    """
+
+    def decorate(
+        operation_method: Callable[P, Awaitable[T]],
+    ) -> Callable[P, Coroutine[Any, Any, T]]:
+        @wraps(operation_method)
+        async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+            # Only the outermost operation owns the timeout and deferred
+            # cancellation. Nested decorated methods run inside that boundary.
+            if _deferred_cancellation_active.get():
+                return await operation_method(*args, **kwargs)
+
+            operation_timeout = timeout
+            if callable(operation_timeout):
+                operation_timeout = operation_timeout(*args, **kwargs)
+
+            active_token = _deferred_cancellation_active.set(True)
+            try:
+                return await _defer_cancellation(
+                    operation_method(*args, **kwargs), operation_timeout
+                )
+            finally:
+                _deferred_cancellation_active.reset(active_token)
+
+        return wrapped
+
+    return decorate
+
+
+def with_operation_lock(
+    lock_for: Callable[..., asyncio.Lock | Awaitable[asyncio.Lock]],
+) -> Callable[[Callable[P, Awaitable[T]]], Callable[P, Coroutine[Any, Any, T]]]:
+    """Acquire an operation lock before running the decorated method.
+
+    ``lock_for`` may return a lock directly or an awaitable.
+    """
+
+    def decorate(
+        method: Callable[P, Awaitable[T]]
+    ) -> Callable[P, Coroutine[Any, Any, T]]:
+        @wraps(method)
+        async def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+            lock = lock_for(*args, **kwargs)
+            if inspect.isawaitable(lock):
+                lock = await lock
+            async with lock:
+                return await method(*args, **kwargs)
+
+        return wrapped
+
+    return decorate

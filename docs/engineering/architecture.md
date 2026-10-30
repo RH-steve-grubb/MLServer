@@ -90,7 +90,7 @@ graph TB
     classDef external fill:#F5A623,stroke:#C47D1A,color:#fff
     classDef core fill:#7ED321,stroke:#5A9A18,color:#fff
 
-    class REST,GRPC,Metrics
+    class REST,GRPC,Metrics server
     class Client,Prometheus,ModelStore external
     class DataPlane,Registry,Pool,Batcher core
 ```
@@ -164,14 +164,11 @@ classDiagram
 
     class MultiModelRegistry {
         -dict~str,SingleModelRegistry~ _models
-        -bool _startup_complete
         +load(model_settings) MLModel
         +unload(name) void
         +unload_version(name, version) void
         +get_model(name, version) MLModel
         +get_models(name) list~MLModel~
-        +startup_complete() void
-        +is_startup_complete bool
     }
 
     class SingleModelRegistry {
@@ -187,9 +184,12 @@ classDiagram
     class DataPlane {
         -Settings _settings
         -MultiModelRegistry _model_registry
+        -bool _startup_complete
         -InferenceMiddlewares _inference_middleware
         +live() bool
         +ready() bool
+        +startup_complete() void
+        +is_startup_complete bool
         +model_ready(name, version) bool
         +metadata() MetadataServerResponse
         +runtimes() RuntimeSecurityResponse
@@ -638,7 +638,6 @@ flowchart TB
     subgraph "DEVELOPMENT Mode"
         DEV_LOG["Log: DEVELOPMENT mode<br/>All implementations allowed"]
         DEV_LOAD["Load model:<br/>validate import path format<br/>allow sys.path injection<br/>allow dynamic module reload<br/>allow custom environments"]
-        DEV_CORS["CORS: wildcard origins allowed"]
     end
 
     subgraph "PRODUCTION Mode"
@@ -646,16 +645,16 @@ flowchart TB
         PROD_PARSE["Parse JSON allowlist"]
         PROD_VALIDATE["Validate each entry:<br/>canonical import path format<br/>uppercase class name"]
         PROD_LOAD["Load model:<br/>reject if not in allowlist<br/>no sys.path injection<br/>no dynamic reload<br/>no custom environments<br/>no environment tarballs"]
-        PROD_CORS["CORS: no wildcard origins<br/>no regex patterns"]
     end
 
+    CORS_POLICY["CORS: explicit origins only<br/>origin regex unsupported"]
     PROD_EMPTY{"Allowlist<br/>empty?"}
     PROD_WARN["WARNING: no models<br/>can be loaded"]
 
     START --> CHECK
     CHECK -->|"No"| DEV_LOG
     DEV_LOG --> DEV_LOAD
-    DEV_LOAD --> DEV_CORS
+    DEV_LOAD --> CORS_POLICY
 
     CHECK -->|"Yes"| PROD_LOG
     PROD_LOG --> PROD_PARSE
@@ -663,17 +662,17 @@ flowchart TB
     PROD_VALIDATE --> PROD_EMPTY
     PROD_EMPTY -->|"Yes"| PROD_WARN
     PROD_EMPTY -->|"No"| PROD_LOAD
-    PROD_LOAD --> PROD_CORS
+    PROD_LOAD --> CORS_POLICY
 
     classDef dev fill:#7ED321,stroke:#5A9A18,color:#fff
     classDef prod fill:#D0021B,stroke:#A50216,color:#fff
     classDef warn fill:#F5A623,stroke:#C47D1A,color:#fff
     classDef neutral fill:#4A90D9,stroke:#2C5F8A,color:#fff
 
-    class DEV_LOG,DEV_LOAD,DEV_CORS dev
-    class PROD_LOG,PROD_PARSE,PROD_VALIDATE,PROD_LOAD,PROD_CORS prod
+    class DEV_LOG,DEV_LOAD dev
+    class PROD_LOG,PROD_PARSE,PROD_VALIDATE,PROD_LOAD prod
     class PROD_WARN warn
-    class START,CHECK neutral
+    class START,CHECK,CORS_POLICY neutral
 ```
 
 ### Security Enforcement Points
@@ -686,7 +685,7 @@ Runtime security is enforced at multiple layers (defense in depth):
 | Property access | `ModelSettings.implementation` getter | Re-validates on every access in case `implementation_` was mutated |
 | Server startup | `MLServer.start()` | `log_runtime_security_mode()` validates allowlist before any endpoints are accessible |
 | Model repository | Discovery scan | Invalid model entries are skipped without crashing the server |
-| CORS validation | `Settings` model validator | Blocks wildcard CORS in PRODUCTION mode |
+| CORS validation | `Settings` model validator | Blocks wildcard CORS in every mode; origin regex setting is unsupported |
 | Environment validation | `ModelParameters` model validator | Blocks `environment_tarball` and `environment_path` in PRODUCTION mode |
 
 ### Import Path Validation
@@ -748,7 +747,7 @@ flowchart LR
    becomes accessible.
 2. Start all transport servers concurrently via `asyncio.gather()`.
 3. Load all models from the model repository concurrently.
-4. Mark `startup_complete()` — the readiness endpoint begins returning `true`.
+4. Mark `startup_complete()` on the `DataPlane` — the readiness endpoint stops reporting not ready because of startup. From then on it follows `strict_readiness` and `empty_registry_readiness`.
 5. If any model fails to load during startup, the server shuts down
    gracefully.
 
@@ -782,8 +781,8 @@ variables, `.env` files, and JSON configuration files.
 | `parallel_workers` | 1 | Number of multiprocessing workers (1 = disabled) |
 | `max_batch_size` | 0 | Adaptive batching batch size (0 = disabled) |
 | `max_batch_time` | 0.0 | Adaptive batching time window in seconds |
-| `strict_readiness` | true | All models must be ready vs. at least one |
-| `empty_registry_readiness` | true | Report ready when no models loaded |
+| `strict_readiness` | true | If true, all models in the registry must be ready. If false, model readiness is ignored after startup; an empty registry follows `empty_registry_readiness` |
+| `empty_registry_readiness` | true | Report ready when no models are in the registry (both readiness modes) |
 
 ---
 

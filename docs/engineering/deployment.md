@@ -167,25 +167,53 @@ spec:
 
 ## Health Checks
 
-MLServer exposes V2-compliant health endpoints for orchestrator integration:
+MLServer exposes V2-compliant health endpoints through the default configuration for orchestrator integration:
 
 | Endpoint | Protocol | Purpose | Kubernetes Probe |
 |----------|----------|---------|------------------|
 | `GET /v2/health/live` | REST | Server process is alive | `livenessProbe` |
-| `GET /v2/health/ready` | REST | Models loaded and ready | `readinessProbe` |
+| `GET /v2/health/ready` | REST | Server ready (see [Readiness Behavior](#readiness-behavior)) | `readinessProbe` |
 | `ServerLive` | gRPC | Server process is alive | gRPC health check |
-| `ServerReady` | gRPC | Models loaded and ready | gRPC health check |
+| `ServerReady` | gRPC | Server ready (see [Readiness Behavior](#readiness-behavior)) | gRPC health check |
 
 ### Readiness Behavior
 
-Readiness depends on two settings:
+The readiness check answers one question: should traffic be routed to this server? MLServer keeps serving requests whatever the answer is. It is the orchestrator, for example a Kubernetes Service, that acts on it. Two settings control the result:
 
-- **`strict_readiness: true`** (default) — ALL models must be ready
-- **`strict_readiness: false`** — AT LEAST ONE model must be ready
-- **`empty_registry_readiness: true`** (default) — Ready when no models loaded
-- **`empty_registry_readiness: false`** — Not ready when no models loaded
+| State | Readiness |
+|-------|-----------|
+| Startup has not completed | not ready |
+| No models in the registry, `empty_registry_readiness: true` (default) | ready |
+| No models in the registry, `empty_registry_readiness: false` | not ready |
+| Models in the registry, `strict_readiness: true` (default) | ready only if all models in the registry are ready |
+| Models in the registry, `strict_readiness: false` | ready; model readiness is ignored |
 
-During server startup (before `startup_complete` is set), readiness always returns `false` to prevent premature traffic routing.
+Both settings can be set with the `MLSERVER_STRICT_READINESS` and `MLSERVER_EMPTY_REGISTRY_READINESS` environment variables, or in `settings.json`.
+
+#### Strict mode (default)
+
+`strict_readiness: true` follows the V2 inference protocol, where server ready means all models are ready. The server is ready when every model in the registry is ready. A new model or model version is in the registry with `ready` false only while it is being loaded, and one that fails to load is removed from the registry. So the server is not ready while a new model or model version is loading, including when it is loaded through the model repository API after startup. Reloading a version that is already loaded does not affect readiness: the existing model stays in the registry, ready, until the new one has loaded.
+
+#### Lenient mode
+
+`strict_readiness: false` model readiness is ignored after startup; an empty registry follows `empty_registry_readiness`. So the server stays ready while a new model or model version is loading. Loading models dynamically therefore does not block traffic to the models that are already loaded, or further requests to load and unload models. This deliberately departs from the protocol and suits deployments that load models dynamically after startup. In either mode, check individual models with `GET /v2/models/{name}/ready`. In lenient mode it is the only readiness signal for models.
+
+#### Empty registry
+
+The V2 protocol states the server ready API "indicates if all the models are ready for inferencing". It does not say whether that holds when no models are loaded. Either answer is useful in practice. A server may legitimately have no models, for example because models are loaded into it later, and it has to be ready to receive those requests. A deployment that expects its models to be present may instead want an empty server reported as not ready. MLServer therefore extends the protocol with the `empty_registry_readiness` setting, which defaults to ready.
+
+The registry is empty when `load_models_at_startup` is `false`, when the model repository contains no models MLServer can read, or after all models have been unloaded.
+
+- **`empty_registry_readiness: true`** (default) — Ready. Models can be loaded into the server through the model repository API.
+- **`empty_registry_readiness: false`** — Not ready. Use this to require that models are present, for example when they are expected to be loaded at startup. While the registry is empty, an orchestrator stops routing traffic to the server, so models cannot be loaded into it through that route. Keep the default if you load models dynamically into an empty server.
+
+`empty_registry_readiness` applies in both strict and lenient modes after startup completes.
+
+If `empty_registry_readiness` is `false` and no models were loaded once startup completes, MLServer logs a warning, whether because `load_models_at_startup` is `false` or because none were found. It does not log again if all models are unloaded later.
+
+#### Startup
+
+In both modes the server is not ready until startup completes, so traffic is not routed before the initial models have loaded. If a model fails to load at startup, the server shuts down.
 
 ---
 

@@ -537,6 +537,7 @@ class RepositoryIndexRequestConverter:
     ) -> types.RepositoryIndexRequest:
         return types.RepositoryIndexRequest(
             ready=pb_object.ready,
+            include_registry_models=pb_object.include_registry_models,
         )
 
     @classmethod

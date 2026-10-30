@@ -26,7 +26,7 @@ presence of a trusted runtimes allowlist file.
 | sys.path injection | `model-settings.json` triggers adding model folder to Python path | Disabled in PRODUCTION mode |
 | Dependency poisoning | Custom `environment_tarball` contains malicious packages | `environment_tarball` blocked in PRODUCTION mode |
 | Environment path hijacking | `environment_path` points to attacker-controlled directory | `environment_path` blocked in PRODUCTION mode |
-| CORS misconfiguration | Wildcard `allow_origins` or regex patterns in CORS settings | Blocked in PRODUCTION mode |
+| CORS misconfiguration | Wildcard `allow_origins` or regex patterns in CORS settings | Wildcard origins rejected in every mode; support for `allow_origin_regex` is removed |
 
 ### Out of Scope
 
@@ -98,8 +98,9 @@ them without crashing the server. Invalid models are skipped, not loaded.
 
 ### Layer 5: CORS Validation
 
-`Settings.validate_no_wildcard_cors_in_production_mode()` blocks wildcard
-CORS origins and regex patterns in PRODUCTION mode.
+`Settings.validate_no_wildcard_cors()` always blocks wildcard CORS origins.
+`allow_origin_regex` is no longer supported; use explicit origins in
+`allow_origins` instead.
 
 ### Layer 6: Environment Validation
 
@@ -125,8 +126,8 @@ The set of recognised aliases is defined in
    import paths that should be loadable.
 3. Do **not** set `environment_tarball` or `environment_path` in any
    `model-settings.json`.
-4. Do **not** configure wildcard CORS origins (`['*']`) or CORS origin
-   regex patterns.
+4. Configure only explicit CORS origins in `allow_origins`. Do **not** use
+   wildcard origins (`['*']`); `allow_origin_regex` is no longer supported.
 5. Verify at startup that the log shows `Runtime security: PRODUCTION`.
 
 ## Logging

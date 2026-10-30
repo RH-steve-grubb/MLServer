@@ -167,18 +167,12 @@ def prometheus_registry(
     PrometheusMiddleware._metrics.clear()
 
 
-@pytest.fixture
-def event_loop():
-    # By default use uvloop for tests
+@pytest.fixture(scope="session", autouse=True)
+def uvloop_policy():
+    # Install uvloop once before pytest-asyncio creates its per-test loops.
+    # Replacing the policy from a function-scoped event_loop fixture prevents
+    # pytest-asyncio from closing its replacement loop between tests.
     install_uvloop_event_loop()
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        # No event loop running yet, create a new one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    yield loop
-    loop.close()
 
 
 @pytest.fixture
@@ -346,27 +340,6 @@ def inference_response() -> types.InferenceResponse:
 async def model_registry(sum_model_settings: ModelSettings) -> MultiModelRegistry:
     model_registry = MultiModelRegistry()
     await model_registry.load(sum_model_settings)
-    # Simulate that startup phase has completed
-    model_registry.startup_complete()
-    return model_registry
-
-
-@pytest.fixture
-async def model_registry_during_startup(
-    sum_model_settings: ModelSettings, simple_model_settings: ModelSettings
-) -> MultiModelRegistry:
-    """Model registry during startup phase (startup not yet complete)."""
-    model_registry = MultiModelRegistry()
-
-    # Load a model in ready state
-    ready_model = await model_registry.load(sum_model_settings)
-    ready_model.ready = True
-
-    # Load a model in not ready state
-    not_ready_model = await model_registry.load(simple_model_settings)
-    not_ready_model.ready = False
-
-    # Don't call startup_complete() - simulate during-startup state
     return model_registry
 
 
@@ -388,17 +361,20 @@ def data_plane(
     model_registry: MultiModelRegistry,
     prometheus_registry: CollectorRegistry,
 ) -> DataPlane:
-    return DataPlane(settings=settings, model_registry=model_registry)
+    data_plane = DataPlane(settings=settings, model_registry=model_registry)
+    # Simulate that startup phase has completed
+    data_plane.startup_complete()
+    return data_plane
 
 
 @pytest.fixture
 def data_plane_during_startup(
     settings: Settings,
-    model_registry_during_startup: MultiModelRegistry,
+    model_registry: MultiModelRegistry,
     prometheus_registry: CollectorRegistry,
 ) -> DataPlane:
-    """DataPlane with a model registry during startup (startup not yet complete)."""
-    return DataPlane(settings=settings, model_registry=model_registry_during_startup)
+    """DataPlane before startup has completed."""
+    return DataPlane(settings=settings, model_registry=model_registry)
 
 
 @pytest.fixture

@@ -32,8 +32,6 @@ async def model_registry(
 
     model_name = sum_model_settings.name
     await model_registry.load(sum_model_settings)
-    # Simulate that startup phase has completed
-    model_registry.startup_complete()
 
     yield model_registry
 

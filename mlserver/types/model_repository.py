@@ -10,6 +10,9 @@ from .base import BaseModel
 
 class RepositoryIndexRequest(BaseModel):
     ready: bool | None = None
+    include_registry_models: bool | None = Field(
+        False, description="MLServer extension; include registry models when true."
+    )
 
 
 class State(Enum):

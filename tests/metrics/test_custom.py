@@ -57,6 +57,7 @@ async def test_db_files(
     ipr = mlserver._inference_pool_registry
     assert ipr is not None
     default_pool = ipr._default_pool
+    assert default_pool is not None
     for pid in default_pool._workers:
         db_file = os.path.join(mlserver._settings.metrics_dir, f"histogram_{pid}.db")
         assert await path.isfile(db_file)

@@ -67,6 +67,7 @@ async def test_completed_metrics_survive_worker_termination_and_replacement(
     await rest_client.wait_until_ready()
     assert mlserver._inference_pool_registry is not None
     pool = mlserver._inference_pool_registry._default_pool
+    assert pool is not None
     before = metrics(mlserver)
     async with AsyncClient(
         base_url=f"http://{settings.host}:{settings.http_port}"

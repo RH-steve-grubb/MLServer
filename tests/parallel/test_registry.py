@@ -3,6 +3,7 @@ import os
 import asyncio
 from collections.abc import AsyncGenerator
 from copy import deepcopy
+from typing import cast
 from unittest.mock import patch
 
 from mlserver.env import Environment, compute_hash_of_file
@@ -10,7 +11,8 @@ from mlserver.model import MLModel
 from mlserver.settings import Settings, ModelSettings, ModelParameters
 from mlserver.types import InferenceRequest
 from mlserver.codecs import StringCodec
-from mlserver.parallel.errors import EnvironmentNotFound
+from mlserver.parallel.errors import EnvironmentNotFound, InferencePoolUnavailable
+from mlserver.parallel.pool import InferencePool
 from mlserver.parallel.registry import (
     InferencePoolRegistry,
     _set_environment_hash,
@@ -84,12 +86,262 @@ async def test_default_pool(
     assert worker_count == settings.parallel_workers
 
 
-@pytest.mark.parametrize("inference_pool_gid", ["dummy_id", None])
+@pytest.mark.parametrize(
+    ("first_gid", "second_gid", "same_lock"),
+    [
+        (None, None, True),
+        ("shared-gid", "shared-gid", True),
+        (None, "keyed-gid", False),
+        ("first-gid", "second-gid", False),
+    ],
+    ids=[
+        "same-default-pool",
+        "same-keyed-pool",
+        "default-and-keyed-pools",
+        "different-keyed-pools",
+    ],
+)
+async def test_get_pool_lock_uses_pool_identity(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    first_gid: str | None,
+    second_gid: str | None,
+    same_lock: bool,
+):
+    first_settings = deepcopy(sum_model_settings)
+    assert first_settings.parameters is not None
+    first_settings.parameters.inference_pool_gid = first_gid
+    second_settings = deepcopy(sum_model_settings)
+    assert second_settings.parameters is not None
+    second_settings.parameters.inference_pool_gid = second_gid
+
+    first_lock = await inference_pool_registry._get_pool_lock(
+        SumModel(first_settings), loading=True
+    )
+    second_lock = await inference_pool_registry._get_pool_lock(
+        SumModel(second_settings), loading=True
+    )
+
+    assert (first_lock is second_lock) is same_lock
+
+
+async def test_get_pool_lock_matches_loading_and_unloading_environment_identity(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    mocker,
+):
+    async def hash_environment_path(_path: str) -> str:
+        return "environment-hash"
+
+    mocker.patch(
+        "mlserver.parallel.registry.compute_hash_of_string",
+        new=hash_environment_path,
+    )
+    settings = deepcopy(sum_model_settings)
+    assert settings.parameters is not None
+    settings.parameters.environment_path = "/tmp/model-environment"
+    settings.parameters.inference_pool_gid = "environment-gid"
+
+    loading_model = SumModel(settings)
+    unloading_model = SumModel(deepcopy(settings))
+    _set_environment_hash(unloading_model, "environment-hash-environment-gid")
+
+    loading_lock = await inference_pool_registry._get_pool_lock(
+        loading_model, loading=True
+    )
+    unloading_lock = await inference_pool_registry._get_pool_lock(unloading_model)
+
+    assert loading_lock is unloading_lock
+
+
+@pytest.mark.parametrize(
+    "environment_parameter",
+    ["environment_path", "environment_tarball"],
+    ids=["environment-path", "environment-tarball"],
+)
+async def test_get_pool_lock_distinguishes_empty_gid_in_custom_environment(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    mocker,
+    environment_parameter: str,
+):
+    async def hash_environment(_value: str) -> str:
+        return "environment-hash"
+
+    mocker.patch(
+        "mlserver.parallel.registry.compute_hash_of_string", new=hash_environment
+    )
+    mocker.patch(
+        "mlserver.parallel.registry.compute_hash_of_file", new=hash_environment
+    )
+
+    none_settings = deepcopy(sum_model_settings)
+    empty_settings = deepcopy(sum_model_settings)
+    assert none_settings.parameters is not None
+    assert empty_settings.parameters is not None
+    setattr(none_settings.parameters, environment_parameter, "/tmp/model-environment")
+    setattr(empty_settings.parameters, environment_parameter, "/tmp/model-environment")
+    none_settings.parameters.inference_pool_gid = None
+    empty_settings.parameters.inference_pool_gid = ""
+
+    none_lock = await inference_pool_registry._get_pool_lock(
+        SumModel(none_settings), loading=True
+    )
+    empty_lock = await inference_pool_registry._get_pool_lock(
+        SumModel(empty_settings), loading=True
+    )
+
+    assert none_lock is not empty_lock
+
+
+@pytest.mark.parametrize(
+    ("first_gid", "second_gid", "same_lock"),
+    [
+        (None, None, True),
+        ("shared-gid", "shared-gid", True),
+        (None, "different-gid", False),
+    ],
+    ids=["same-tarball-pool", "same-tarball-gid", "different-tarball-gids"],
+)
+async def test_get_pool_lock_uses_environment_tarball_identity(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    first_gid: str | None,
+    second_gid: str | None,
+    same_lock: bool,
+    mocker,
+):
+    async def hash_environment_tarball(_path: str) -> str:
+        return "environment-hash"
+
+    mocker.patch(
+        "mlserver.parallel.registry.compute_hash_of_file",
+        new=hash_environment_tarball,
+    )
+    first_settings = deepcopy(sum_model_settings)
+    assert first_settings.parameters is not None
+    first_settings.parameters.environment_tarball = "environment.tar.gz"
+    first_settings.parameters.inference_pool_gid = first_gid
+    second_settings = deepcopy(sum_model_settings)
+    assert second_settings.parameters is not None
+    second_settings.parameters.environment_tarball = "environment.tar.gz"
+    second_settings.parameters.inference_pool_gid = second_gid
+
+    first_lock = await inference_pool_registry._get_pool_lock(
+        SumModel(first_settings), loading=True
+    )
+    second_lock = await inference_pool_registry._get_pool_lock(
+        SumModel(second_settings), loading=True
+    )
+
+    assert (first_lock is second_lock) is same_lock
+
+
+async def test_get_pool_lock_returns_independent_lock_for_unresolved_unload(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    model = SumModel(deepcopy(sum_model_settings))
+
+    first_lock = await inference_pool_registry._get_pool_lock(model)
+    second_lock = await inference_pool_registry._get_pool_lock(model)
+
+    assert first_lock is not second_lock
+    assert not inference_pool_registry._operation_locks
+
+
+async def test_get_pool_lock_returns_independent_lock_for_non_pool_model(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    settings = deepcopy(sum_model_settings)
+    settings.parallel_workers = 0
+    model = SumModel(settings)
+
+    first_lock = await inference_pool_registry._get_pool_lock(model, loading=True)
+    second_lock = await inference_pool_registry._get_pool_lock(model, loading=True)
+
+    assert first_lock is not second_lock
+
+
+async def test_close_drains_operation_locks_and_is_terminal(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    settings = deepcopy(sum_model_settings)
+    assert settings.parameters is not None
+    settings.parameters.inference_pool_gid = "close-gid"
+    model = SumModel(settings)
+    lock = await inference_pool_registry._get_pool_lock(model, loading=True)
+    await lock.acquire()
+
+    close_task = asyncio.create_task(inference_pool_registry.close())
+    await asyncio.sleep(0)
+    assert not close_task.done()
+
+    lock.release()
+    await close_task
+
+    assert inference_pool_registry._default_pool is None
+    assert not inference_pool_registry._pools
+
+    # Test idempotency
+    await inference_pool_registry.close()
+
+    model = SumModel(deepcopy(sum_model_settings))
+    with pytest.raises(InferencePoolUnavailable):
+        await inference_pool_registry.load_model(model)
+    with pytest.raises(InferencePoolUnavailable):
+        await inference_pool_registry.unload_model(model)
+
+
+@pytest.mark.parametrize(
+    ("pool_id", "expected_name"),
+    [("failing-gid", "failing pool"), (None, "failing default pool")],
+    ids=["keyed-pool", "default-pool"],
+)
+async def test_close_pool_removes_pool_after_cleanup_failure(
+    inference_pool_registry: InferencePoolRegistry,
+    pool_id: str | None,
+    expected_name: str,
+):
+    class FailingPool:
+        name = expected_name
+        _env = object()
+
+        async def close(self):
+            raise RuntimeError("pool cleanup failed")
+
+    failing_pool = cast(InferencePool, FailingPool())
+    original_default_pool = inference_pool_registry._default_pool
+    if pool_id is None:
+        inference_pool_registry._default_pool = failing_pool
+    else:
+        inference_pool_registry._pools[pool_id] = failing_pool
+
+    try:
+        with pytest.raises(RuntimeError, match="pool cleanup failed"):
+            await inference_pool_registry._close_pool(pool_id)
+
+        if pool_id is None:
+            assert inference_pool_registry._default_pool is None
+        else:
+            assert pool_id not in inference_pool_registry._pools
+    finally:
+        if pool_id is None and original_default_pool is not None:
+            await original_default_pool.close()
+
+
+@pytest.mark.parametrize(
+    ("inference_pool_gid", "uses_default_pool"),
+    [("dummy_id", False), (None, True), ("", True)],
+)
 async def test_load_model(
     inference_pool_registry: InferencePoolRegistry,
     sum_model_settings: ModelSettings,
     inference_request: InferenceRequest,
-    inference_pool_gid: str,
+    inference_pool_gid: str | None,
+    uses_default_pool: bool,
 ):
     sum_model_settings = deepcopy(sum_model_settings)
     sum_model_settings.name = "foo"
@@ -104,7 +356,354 @@ async def test_load_model(
     assert inference_response.model_name == sum_model.settings.name
     assert len(inference_response.outputs) == 1
 
+    if uses_default_pool:
+        assert inference_pool_registry._default_pool is not None
+        assert inference_pool_registry._default_pool.has_model(sum_model.settings)
+        assert inference_pool_gid not in inference_pool_registry._pools
+    else:
+        assert inference_pool_gid is not None
+        assert inference_pool_gid in inference_pool_registry._pools
+        assert inference_pool_registry._pools[inference_pool_gid].has_model(
+            sum_model.settings
+        )
+
     await inference_pool_registry.unload_model(sum_model)
+
+
+@pytest.mark.parametrize(
+    "pool_gid",
+    [None, "shared-gid"],
+    ids=["default-pool", "keyed-pool"],
+)
+async def test_load_model_serializes_models_sharing_pool(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    pool_gid: str | None,
+    mocker,
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    maximum_active = 0
+
+    class FakePool:
+        env_hash = None
+
+        async def load_model(self, model: MLModel) -> MLModel:
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            entered.set()
+            await release.wait()
+            active -= 1
+            return model
+
+    pool = FakePool()
+
+    async def get_pool(_model: MLModel) -> FakePool:
+        return pool
+
+    mocker.patch.object(inference_pool_registry, "_get_or_create", new=get_pool)
+    first_settings = deepcopy(sum_model_settings)
+    first_settings.name = "shared-pool-first"
+    assert first_settings.parameters is not None
+    first_settings.parameters.inference_pool_gid = pool_gid
+    second_settings = deepcopy(sum_model_settings)
+    second_settings.name = "shared-pool-second"
+    assert second_settings.parameters is not None
+    second_settings.parameters.inference_pool_gid = pool_gid
+
+    first_load = asyncio.create_task(
+        inference_pool_registry.load_model(SumModel(first_settings))
+    )
+    await entered.wait()
+    second_load = asyncio.create_task(
+        inference_pool_registry.load_model(SumModel(second_settings))
+    )
+    await asyncio.sleep(0)
+
+    assert not second_load.done()
+    assert maximum_active == 1
+    release.set()
+    await asyncio.gather(first_load, second_load)
+
+
+@pytest.mark.parametrize(
+    "pool_gids",
+    [
+        (None, "keyed-gid"),
+        ("gid-a", "gid-b"),
+    ],
+    ids=["default-and-keyed", "different-keyed-pools"],
+)
+async def test_load_model_allows_different_pools_concurrently(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    pool_gids: tuple[str | None, str | None],
+    mocker,
+):
+    entered = 0
+    maximum_active = 0
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+
+    class FakePool:
+        env_hash = None
+
+        async def load_model(self, model: MLModel) -> MLModel:
+            nonlocal active, entered, maximum_active
+            entered += 1
+            active += 1
+            maximum_active = max(maximum_active, active)
+            if entered == 2:
+                both_entered.set()
+            await release.wait()
+            active -= 1
+            return model
+
+    pools = {pool_gids[0]: FakePool(), pool_gids[1]: FakePool()}
+
+    async def get_pool(model: MLModel) -> FakePool:
+        assert model.settings.parameters is not None
+        gid = model.settings.parameters.inference_pool_gid
+        return pools[gid]
+
+    mocker.patch.object(inference_pool_registry, "_get_or_create", new=get_pool)
+    default_settings = deepcopy(sum_model_settings)
+    default_settings.name = "first-pool-model"
+    assert default_settings.parameters is not None
+    default_settings.parameters.inference_pool_gid = pool_gids[0]
+    keyed_settings = deepcopy(sum_model_settings)
+    keyed_settings.name = "second-pool-model"
+    assert keyed_settings.parameters is not None
+    keyed_settings.parameters.inference_pool_gid = pool_gids[1]
+
+    default_load = asyncio.create_task(
+        inference_pool_registry.load_model(SumModel(default_settings))
+    )
+    keyed_load = asyncio.create_task(
+        inference_pool_registry.load_model(SumModel(keyed_settings))
+    )
+    await both_entered.wait()
+
+    assert maximum_active == 2
+    release.set()
+    await asyncio.gather(default_load, keyed_load)
+
+
+@pytest.mark.parametrize(
+    "pool_gid",
+    [None, "shared-gid"],
+    ids=["default-pool", "keyed-pool"],
+)
+async def test_load_model_serializes_unload_for_same_pool(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    pool_gid: str | None,
+    mocker,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+    unload_entered = asyncio.Event()
+
+    class FakePool:
+        env_hash = None
+
+        async def load_model(self, model: MLModel) -> MLModel:
+            load_started.set()
+            await release_load.wait()
+            return model
+
+        async def unload_model(self, model: MLModel) -> MLModel:
+            unload_entered.set()
+            return model
+
+    pool = FakePool()
+
+    async def get_pool(_model: MLModel) -> FakePool:
+        return pool
+
+    mocker.patch.object(inference_pool_registry, "_get_or_create", new=get_pool)
+    mocker.patch.object(inference_pool_registry, "_find", new=get_pool)
+    mocker.patch.object(inference_pool_registry, "_close_pool_if_empty")
+
+    load_settings = deepcopy(sum_model_settings)
+    load_settings.name = "load-model"
+    assert load_settings.parameters is not None
+    load_settings.parameters.inference_pool_gid = pool_gid
+    unload_settings = deepcopy(sum_model_settings)
+    unload_settings.name = "unload-model"
+    assert unload_settings.parameters is not None
+    unload_settings.parameters.inference_pool_gid = pool_gid
+
+    load_task = asyncio.create_task(
+        inference_pool_registry.load_model(SumModel(load_settings))
+    )
+    await load_started.wait()
+
+    unload_model = SumModel(unload_settings)
+    _set_environment_hash(unload_model, None)
+    unload_task = asyncio.create_task(
+        inference_pool_registry.unload_model(unload_model)
+    )
+    await asyncio.sleep(0)
+
+    assert not unload_task.done()
+    assert not unload_entered.is_set()
+
+    release_load.set()
+    await asyncio.gather(load_task, unload_task)
+    assert unload_entered.is_set()
+
+
+@pytest.mark.parametrize(
+    "pool_gids",
+    [
+        (None, "keyed-gid"),
+        ("gid-a", "gid-b"),
+    ],
+    ids=["default-and-keyed", "different-keyed-pools"],
+)
+async def test_load_model_allows_unload_for_different_pools(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    pool_gids: tuple[str | None, str | None],
+    mocker,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+    unload_entered = asyncio.Event()
+
+    class FakePool:
+        env_hash = None
+
+        async def load_model(self, model: MLModel) -> MLModel:
+            load_started.set()
+            await release_load.wait()
+            return model
+
+        async def unload_model(self, model: MLModel) -> MLModel:
+            unload_entered.set()
+            return model
+
+    pools = {pool_gids[0]: FakePool(), pool_gids[1]: FakePool()}
+
+    async def get_pool(model: MLModel) -> FakePool:
+        assert model.settings.parameters is not None
+        gid = model.settings.parameters.inference_pool_gid
+        return pools[gid]
+
+    mocker.patch.object(inference_pool_registry, "_get_or_create", new=get_pool)
+    mocker.patch.object(inference_pool_registry, "_find", new=get_pool)
+    mocker.patch.object(inference_pool_registry, "_close_pool_if_empty")
+
+    load_settings = deepcopy(sum_model_settings)
+    load_settings.name = "load-model"
+    assert load_settings.parameters is not None
+    load_settings.parameters.inference_pool_gid = pool_gids[0]
+    unload_settings = deepcopy(sum_model_settings)
+    unload_settings.name = "unload-model"
+    assert unload_settings.parameters is not None
+    unload_settings.parameters.inference_pool_gid = pool_gids[1]
+
+    load_task = asyncio.create_task(
+        inference_pool_registry.load_model(SumModel(load_settings))
+    )
+    await load_started.wait()
+
+    unload_model = SumModel(unload_settings)
+    _set_environment_hash(unload_model, None)
+    unload_task = asyncio.create_task(
+        inference_pool_registry.unload_model(unload_model)
+    )
+    await unload_entered.wait()
+
+    assert not load_task.done()
+    release_load.set()
+    await asyncio.gather(load_task, unload_task)
+
+
+async def test_load_model_cancellation_settles_and_preserves_pool_state(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    mocker,
+):
+    load_started = asyncio.Event()
+    release_load = asyncio.Event()
+    loaded_models: list[MLModel] = []
+
+    class FakePool:
+        env_hash = None
+
+        async def load_model(self, model: MLModel) -> MLModel:
+            load_started.set()
+            await release_load.wait()
+            loaded_models.append(model)
+            return model
+
+    pool = FakePool()
+
+    async def get_pool(_model: MLModel) -> FakePool:
+        return pool
+
+    mocker.patch.object(inference_pool_registry, "_get_or_create", new=get_pool)
+
+    model = SumModel(deepcopy(sum_model_settings))
+    load_task = asyncio.create_task(inference_pool_registry.load_model(model))
+    await load_started.wait()
+
+    load_task.cancel()
+    await asyncio.sleep(0)
+    assert not load_task.done()
+
+    release_load.set()
+    await load_task
+
+    assert loaded_models == [model]
+
+
+async def test_unload_model_cancellation_settles_and_clears_pool_state(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+    mocker,
+):
+    unload_started = asyncio.Event()
+    release_unload = asyncio.Event()
+    loaded_models: list[MLModel] = []
+
+    class FakePool:
+        env_hash = None
+
+        async def unload_model(self, model: MLModel) -> MLModel:
+            unload_started.set()
+            await release_unload.wait()
+            loaded_models.remove(model)
+            return model
+
+    pool = FakePool()
+
+    async def find_pool(_model: MLModel) -> FakePool:
+        return pool
+
+    mocker.patch.object(inference_pool_registry, "_find", new=find_pool)
+    mocker.patch.object(inference_pool_registry, "_close_pool_if_empty")
+
+    model = SumModel(deepcopy(sum_model_settings))
+    _set_environment_hash(model, None)
+    loaded_models.append(model)
+
+    unload_task = asyncio.create_task(inference_pool_registry.unload_model(model))
+    await unload_started.wait()
+
+    unload_task.cancel()
+    await asyncio.sleep(0)
+    assert not unload_task.done()
+
+    release_unload.set()
+    await unload_task
+
+    assert not loaded_models
 
 
 async def test_load_model_with_hooks(
@@ -128,10 +727,7 @@ async def test_load_model_with_hooks(
         with pytest.raises(Exception, match="test_hook_executed_in_worker"):
             await registry.load_model(sum_model)
     finally:
-        try:
-            await registry.close()
-        except Exception:
-            pass
+        await registry.close()
 
 
 def check_sklearn_version(response):
@@ -254,12 +850,19 @@ async def test_worker_stop(
 ):
     # Pick random worker and kill it
     default_pool = inference_pool_registry._default_pool
+    assert default_pool is not None
     workers = list(default_pool._workers.values())
     stopped_worker = workers[0]
     stopped_worker.kill()
 
-    # Give some time for worker to come up
-    await asyncio.sleep(5)
+    async def wait_for_replacement() -> None:
+        while (
+            len(default_pool._dispatcher._ready_workers) != settings.parallel_workers
+            or stopped_worker.pid in default_pool._dispatcher._ready_workers
+        ):
+            await asyncio.sleep(0.1)
+
+    await asyncio.wait_for(wait_for_replacement(), timeout=5)
 
     # Ensure SIGCHD signal was handled
     assert f"with PID {stopped_worker.pid}" in caplog.text
@@ -335,32 +938,37 @@ async def test_env_and_env_gid(
 
 
 @pytest.mark.parametrize(
-    "inference_pool_grid, autogenerate_inference_pool_grid",
+    "inference_pool_gid, autogenerate_inference_pool_gid",
     [
         ("dummy_gid", False),
         ("dummy_gid", True),
         (None, True),
         (None, False),
+        ("", True),
+        ("", False),
     ],
 )
 def test_autogenerate_inference_pool_gid(
-    inference_pool_grid: str, autogenerate_inference_pool_grid: bool
+    inference_pool_gid: str | None, autogenerate_inference_pool_gid: bool
 ):
     patch_uuid = "patch-uuid"
-    with patch("uuid.uuid4", return_value=patch_uuid):
+    with patch("uuid.uuid4", return_value=patch_uuid) as uuid4:
         model_settings = ModelSettings(
             name="dummy-model",
             implementation=SumModel,
             parameters=ModelParameters(
-                inference_pool_gid=inference_pool_grid,
-                autogenerate_inference_pool_gid=autogenerate_inference_pool_grid,
+                inference_pool_gid=inference_pool_gid,
+                autogenerate_inference_pool_gid=autogenerate_inference_pool_gid,
             ),
         )
+    assert uuid4.call_count == int(
+        autogenerate_inference_pool_gid and inference_pool_gid is None
+    )
 
     expected_gid = (
-        inference_pool_grid
-        if not autogenerate_inference_pool_grid
-        else (inference_pool_grid or patch_uuid)
+        patch_uuid
+        if autogenerate_inference_pool_gid and inference_pool_gid is None
+        else inference_pool_gid
     )
     assert model_settings.parameters is not None
     assert model_settings.parameters.inference_pool_gid == expected_gid
@@ -553,3 +1161,68 @@ async def test_reload_model_different_gid(
 
     await inference_pool_registry.unload_model(new_model)
     assert len(inference_pool_registry._pools) == 0
+
+
+async def test_reload_model_default_to_gid(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    """Reloading from the default pool to a keyed pool moves pool ownership."""
+    default_settings = deepcopy(sum_model_settings)
+    assert default_settings.parameters is not None
+    default_settings.parameters.inference_pool_gid = None
+
+    gid_settings = deepcopy(default_settings)
+    assert gid_settings.parameters is not None
+    gid_settings.parameters.inference_pool_gid = "migration-gid"
+
+    old_model = await inference_pool_registry.load_model(SumModel(default_settings))
+    assert len(inference_pool_registry._pools) == 0
+    assert inference_pool_registry._default_pool is not None
+    assert inference_pool_registry._default_pool.has_model(old_model.settings)
+
+    new_model = await inference_pool_registry.load_model(SumModel(gid_settings))
+    assert old_model != new_model
+    assert len(inference_pool_registry._pools) == 1
+    assert "migration-gid" in inference_pool_registry._pools
+    assert inference_pool_registry._pools["migration-gid"].has_model(new_model.settings)
+
+    await inference_pool_registry.unload_model(old_model)
+    assert not inference_pool_registry._default_pool.has_model(old_model.settings)
+    assert "migration-gid" in inference_pool_registry._pools
+
+    await inference_pool_registry.unload_model(new_model)
+    assert len(inference_pool_registry._pools) == 0
+
+
+async def test_reload_model_gid_to_default(
+    inference_pool_registry: InferencePoolRegistry,
+    sum_model_settings: ModelSettings,
+):
+    """Reloading from a keyed pool to the default pool moves pool ownership."""
+    gid_settings = deepcopy(sum_model_settings)
+    assert gid_settings.parameters is not None
+    gid_settings.parameters.inference_pool_gid = "migration-gid"
+
+    default_settings = deepcopy(gid_settings)
+    assert default_settings.parameters is not None
+    default_settings.parameters.inference_pool_gid = None
+
+    old_model = await inference_pool_registry.load_model(SumModel(gid_settings))
+    assert len(inference_pool_registry._pools) == 1
+    assert "migration-gid" in inference_pool_registry._pools
+    assert inference_pool_registry._pools["migration-gid"].has_model(old_model.settings)
+    assert inference_pool_registry._default_pool is not None
+    assert not inference_pool_registry._default_pool.has_model(old_model.settings)
+
+    new_model = await inference_pool_registry.load_model(SumModel(default_settings))
+    assert len(inference_pool_registry._pools) == 1
+    assert "migration-gid" in inference_pool_registry._pools
+    assert old_model != new_model
+    assert inference_pool_registry._default_pool.has_model(new_model.settings)
+
+    await inference_pool_registry.unload_model(old_model)
+    assert len(inference_pool_registry._pools) == 0
+
+    await inference_pool_registry.unload_model(new_model)
+    assert not inference_pool_registry._default_pool.has_model(new_model.settings)

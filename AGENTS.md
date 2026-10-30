@@ -67,8 +67,10 @@ poetry run tox -c ./runtimes/<name>  # Single runtime tests
    trusted-runtimes allowlist rejects them. Two-tier security model:
    - **PRODUCTION** (`/etc/mlserver/trusted-runtimes.json` present): only
      runtimes in `ALLOWED_MODEL_IMPLEMENTATIONS` (`mlserver/settings.py`) load;
-     custom envs and wildcard CORS blocked.
+     custom envs blocked.
    - **DEVELOPMENT** (no artifact file): any runtime loads freely.
+   - **CORS**: wildcard origins are always blocked and
+     `allow_origin_regex` is not supported.
 
 2. **Serial test suites: parallel, grpc, env, cli.** Run after the
    parallel bulk to avoid port conflicts. Do not introduce shared-port

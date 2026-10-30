@@ -8,13 +8,19 @@ from multiprocessing import Queue
 from concurrent.futures import ThreadPoolExecutor
 from asyncio import Future
 
-from ..utils import schedule_with_callback, generate_uuid
+from ..utils import (
+    defer_cancellation,
+    generate_uuid,
+    schedule_with_callback,
+    with_operation_lock,
+)
 from ..metrics import REGISTRY
 
 from .errors import WorkerStop, NoWorkersAvailable
 from .worker import Worker
 from .logging import logger
 from .utils import END_OF_QUEUE, cancel_task
+from ..settings import DEFAULT_MODEL_OPERATION_TIMEOUT, DEFAULT_WORKER_START_TIMEOUT
 from .messages import (
     Message,
     ModelUpdateMessage,
@@ -159,9 +165,17 @@ class AsyncResponses:
 
 
 class Dispatcher:
-    def __init__(self, workers: dict[int, Worker], responses: Queue):
+    def __init__(
+        self,
+        workers: dict[int, Worker],
+        responses: Queue,
+        model_operation_timeout: float = DEFAULT_MODEL_OPERATION_TIMEOUT,
+        worker_start_timeout: float = DEFAULT_WORKER_START_TIMEOUT,
+    ):
         self._responses = responses
         self._workers = workers
+        self._model_operation_timeout = model_operation_timeout
+        self._worker_start_timeout = worker_start_timeout
         self._ready_workers = dict(workers)
         self._workers_round_robin = self._reset_round_robin()
         self._worker_starting_lock = asyncio.Lock()
@@ -181,6 +195,8 @@ class Dispatcher:
         self._workers_round_robin = cycle(worker_pids)
         return self._workers_round_robin
 
+    @with_operation_lock(lambda self, *args, **kwargs: self._worker_starting_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._worker_start_timeout)
     async def on_worker_start(
         self,
         worker: Worker,
@@ -192,12 +208,9 @@ class Dispatcher:
         replay) so no concurrent dispatch_update can reach the worker in an
         inconsistent state during initialization.
         """
-        # Lock while worker is coming up to ensure no model updates get lost in
-        # translation
-        async with self._worker_starting_lock:
-            self._workers[worker.pid] = worker  # type: ignore
-            if init_coro is not None:
-                await init_coro
+        self._workers[worker.pid] = worker  # type: ignore
+        if init_coro is not None:
+            await init_coro
 
     def on_worker_ready(self, worker: Worker):
         """
@@ -293,39 +306,41 @@ class Dispatcher:
             raise NoWorkersAvailable() from None
         return self._ready_workers[worker_pid], worker_pid
 
+    @with_operation_lock(lambda self, *args, **kwargs: self._worker_starting_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
     async def dispatch_update(
         self, model_update: ModelUpdateMessage
     ) -> list[ModelResponseMessage]:
-        async with self._worker_starting_lock:
-            # Dispatch to all workers concurrently and wait for results
-            # to ensure state is properly maintained
-            results = await asyncio.gather(
-                *[
-                    self.dispatch_update_to_worker(worker, model_update)
-                    for worker in self._workers.values()
-                ],
-                return_exceptions=True,
-            )
-            non_stop = None
-            successes = []
-            for r in results:
-                if isinstance(r, ModelResponseMessage):
-                    successes.append(r)
-                elif not isinstance(r, WorkerStop):
-                    non_stop = non_stop or r
+        # Dispatch to all workers concurrently and wait for results
+        # to ensure state is properly maintained
+        results = await asyncio.gather(
+            *[
+                self.dispatch_update_to_worker(worker, model_update)
+                for worker in self._workers.values()
+            ],
+            return_exceptions=True,
+        )
+        non_stop = None
+        successes = []
+        for r in results:
+            if isinstance(r, ModelResponseMessage):
+                successes.append(r)
+            elif not isinstance(r, WorkerStop):
+                non_stop = non_stop or r
 
-            # If any error other than a worker stop error is returned raise immediately
-            if non_stop:
-                raise non_stop
-            # If no successful results or all results are worker stop errors, this
-            # indicates all workers crashed. For load operations we must raise here
-            # to perform rollback and maintain a consistent state
-            if not successes and model_update.update_type == ModelUpdateType.Load:
-                raise NoWorkersAvailable()
+        # If any error other than a worker stop error is returned raise immediately
+        if non_stop:
+            raise non_stop
+        # If every worker stopped without returning a successful response, a
+        # load cannot establish model state and must fail so the caller can
+        # roll back. Unload remains successful because the desired state is
+        # already removal.
+        if not successes and model_update.update_type == ModelUpdateType.Load:
+            raise NoWorkersAvailable()
 
-            # If at least one result is a success, this means any workers that crashed
-            # will properly recover on replay
-            return cast(list[ModelResponseMessage], successes)
+        # If at least one result is a success, this means any workers that crashed
+        # will properly recover on replay
+        return cast(list[ModelResponseMessage], successes)
 
     async def dispatch_update_to_worker(
         self, worker: Worker, model_update: ModelUpdateMessage
@@ -340,6 +355,7 @@ class Dispatcher:
     async def stop(self):
         self._active = False
         self._ready_workers.clear()
+        self._reset_round_robin()
         if self._transport is not None:
             await self._transport.close()
         if self._process_responses_task is not None:

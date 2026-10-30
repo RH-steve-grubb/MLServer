@@ -79,6 +79,7 @@ async def responses(  # type: ignore[type-arg]
     yield q
 
     q.close()
+    q.join_thread()
 
 
 @pytest.fixture
@@ -104,8 +105,10 @@ async def worker(
 
     yield worker
 
-    await worker.stop()
-    await cancel_task(worker_task)  # type: ignore[arg-type]
+    try:
+        await worker.stop()
+    finally:
+        await cancel_task(worker_task)  # type: ignore[arg-type]
 
 
 @pytest.fixture
@@ -206,4 +209,10 @@ async def worker_with_env(
 
     yield worker
 
-    await worker.stop()
+    try:
+        await worker.stop()
+        worker.join(settings.parallel_workers_timeout)
+    finally:
+        if worker.is_alive():
+            worker.kill()
+            worker.join()

@@ -9,11 +9,13 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from prometheus_client import Counter
 
 from ..model import MLModel
+from ..utils import defer_cancellation, with_operation_lock
 from ..types import InferenceRequest, InferenceResponse
 from ..settings import Settings, ModelSettings
 from ..env import Environment
 
 from .model import ParallelModel
+from .errors import InferencePoolUnavailable
 from .worker import Worker, WorkerModelHook
 from .logging import logger
 from .utils import configure_inference_pool, terminate_queue
@@ -66,6 +68,9 @@ class WorkerRegistry:
 
     def has_model(self, model_settings: ModelSettings) -> bool:
         return self._key(model_settings) in self._models
+
+    def clear(self) -> None:
+        self._models.clear()
 
     def __len__(self) -> int:
         return len(self._models)
@@ -121,6 +126,7 @@ class InferencePool:
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False
+        self._operation_lock = asyncio.Lock()
         self._settings = settings
         self._responses: Queue[ModelResponseMessage] = Queue()
         self._transport_directory: TemporaryDirectory[str] | None = None
@@ -142,7 +148,12 @@ class InferencePool:
             )
             self._workers[worker.pid] = worker  # type: ignore
 
-        self._dispatcher = Dispatcher(self._workers, self._responses)
+        self._dispatcher = Dispatcher(
+            self._workers,
+            self._responses,
+            model_operation_timeout=self._settings.model_operation_timeout,
+            worker_start_timeout=self._settings.worker_start_timeout,
+        )
         self._dispatcher.start()
 
     @property
@@ -202,6 +213,10 @@ class InferencePool:
                 )
                 raise failures[0]
         finally:
+            # The child has already been reaped by the SIGCHLD handler. Clean
+            # up the parent-side queue resources before discarding the worker.
+            worker.close_queues()
+
             # create_task is intentional: allows the SIGCHLD handler to process
             # all crashed PIDs immediately rather than blocking on each
             # replacement's replay. The task is kept alive by the event loop's
@@ -226,6 +241,10 @@ class InferencePool:
                 exc_info=True,
             )
 
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.worker_start_timeout
+    )
     async def _start_worker(self) -> Worker | None:
         # Do not start a worker if the pool is closing
         if self._closing:
@@ -242,13 +261,23 @@ class InferencePool:
         # Phase 1/2 replay runs inside the dispatcher lock via on_worker_start
         # to ensure no concurrent dispatch_update can reach the replacement
         # worker in an inconsistent state during initialization
-        await self._dispatcher.on_worker_start(worker, self._replay_worker(worker))
+        try:
+            await self._dispatcher.on_worker_start(worker, self._replay_worker(worker))
+        except (Exception, asyncio.CancelledError):
+            # Replay can fail through an operation error, timeout, or
+            # cancellation. In every case the replacement worker is not safe
+            # to publish as ready.
+            worker.kill()
+            raise
 
         if not self._closing:
             self._dispatcher.on_worker_ready(worker)
             logger.info(
                 f"New worker with PID {worker.pid} on {self.name} is now ready."
             )
+        else:
+            worker.kill()
+            return None
         return worker
 
     async def _replay_worker(self, worker: Worker):
@@ -257,10 +286,8 @@ class InferencePool:
         dispatcher lock (via on_worker_start) so no concurrent dispatch_update
         can interleave with initialization.
         """
-        # If the pool started closing while waiting for the lock, kill the
-        # spawned worker rather than leaving it orphaned
+        # If the pool started closing while waiting for the lock, skip replay.
         if self._closing:
-            worker.kill()
             return
 
         # Phase 1: load all committed models from the worker registry
@@ -279,7 +306,6 @@ class InferencePool:
         )
         load_failures = [r for r in load_results if isinstance(r, Exception)]
         if load_failures:
-            worker.kill()
             raise load_failures[0]
 
         # Phase 2: load all in-progress reload models so the replacement
@@ -299,13 +325,18 @@ class InferencePool:
         )
         reload_failures = [r for r in reload_results if isinstance(r, Exception)]
         if reload_failures:
-            worker.kill()
             raise reload_failures[0]
 
     def _model_key(self, model_settings: ModelSettings) -> tuple[str, str]:
         return (model_settings.name, model_settings.version or "")
 
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.model_operation_timeout
+    )
     async def load_model(self, model: MLModel) -> MLModel:
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
         # Check for reload
         reload = self.has_model(model.settings)
 
@@ -340,7 +371,13 @@ class InferencePool:
             self._pending_reload[self._model_key(model.settings)] = parallel_model
         return parallel_model
 
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(
+        lambda self, *args, **kwargs: self._settings.model_operation_timeout
+    )
     async def unload_model(self, model: MLModel) -> MLModel:
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
         # Unregister any pending reloads - unload overrides them
         pending_model = self._pending_reload.pop(self._model_key(model.settings), None)
 
@@ -381,7 +418,8 @@ class InferencePool:
     def empty(self) -> bool:
         return len(self._worker_registry) == 0
 
-    async def close(self):
+    @with_operation_lock(lambda self: self._operation_lock)
+    async def close(self) -> None:
         if self._closing:
             return
         self._closing = True
@@ -431,6 +469,11 @@ class InferencePool:
                 self._transport_directory.cleanup()
             except Exception as error:
                 cleanup_errors.append(error)
+
+        # The pool is terminal after close. No model state can be replayed or
+        # rolled back, so release the tracking references after cleanup.
+        self._worker_registry.clear()
+        self._pending_reload.clear()
 
         if cleanup_errors:
             # Track cleanup failures

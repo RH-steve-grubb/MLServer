@@ -17,7 +17,7 @@ container images served by KServe/RHOAI) it presents security risks:
   to `sys.path`, enabling loading of code from arbitrary filesystem paths.
 - **Environment tarballs** — custom environments extracted from tarballs
   could contain malicious dependencies.
-- **CORS misconfiguration** — wildcard CORS origins in production allow any
+- **CORS misconfiguration** — wildcard CORS origins allow any
   website to make cross-origin requests.
 
 ## Decision
@@ -30,14 +30,18 @@ runtimes allowlist file at `/etc/mlserver/trusted-runtimes.json`:
 - All model implementations with valid import path syntax are allowed.
 - `sys.path` injection and dynamic module reload are enabled.
 - Custom `environment_tarball` and `environment_path` are allowed.
-- Wildcard CORS origins are allowed.
 
 ### PRODUCTION Mode (file present)
 
 - Only model implementations listed in the JSON allowlist are permitted.
 - `sys.path` injection and dynamic module reload are disabled.
 - `environment_tarball` and `environment_path` are blocked.
-- Wildcard CORS origins and CORS regex patterns are rejected.
+
+### CORS (both modes)
+
+When CORS is configured, `Settings.validate_no_wildcard_cors()` rejects the
+`*` wildcard origin in both modes. `allow_origin_regex` is not supported;
+configure explicit origins with `allow_origins` instead.
 
 ### Defense in Depth
 
@@ -62,8 +66,7 @@ Built-in runtime aliases are canonicalized before validation.
 **Benefits:**
 - Container images can ship a baked-in allowlist, locking down which
   runtimes are loadable — no runtime configuration changes can bypass it.
-- Zero-config for development: the absence of the file enables full
-  flexibility.
+- Zero-config for development: the absence of the file enables flexibility.
 - Defense-in-depth prevents bypasses through programmatic mutation of
   `implementation_`.
 - The allowlist is cached with `@lru_cache` for performance.

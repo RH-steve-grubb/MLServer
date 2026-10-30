@@ -38,6 +38,8 @@ ENV_PREFIX_SETTINGS = "MLSERVER_"
 ENV_PREFIX_MODEL_SETTINGS = "MLSERVER_MODEL_"
 
 DEFAULT_PARALLEL_WORKERS = 1
+DEFAULT_MODEL_OPERATION_TIMEOUT = 60
+DEFAULT_WORKER_START_TIMEOUT = 300
 
 DEFAULT_ENVIRONMENTS_DIR = os.path.join(os.getcwd(), ".envs")
 DEFAULT_METRICS_DIR = os.path.join(os.getcwd(), ".metrics")
@@ -303,14 +305,7 @@ class CORSSettings(BaseSettings):
     """
     A list of origins that should be permitted to make
     cross-origin requests. E.g. ['https://example.org', 'https://www.example.org'].
-    You can use ['*'] to allow any origin
-    """
-
-    allow_origin_regex: str | None = None
-    """
-    A regex string to match against origins that
-    should be permitted to make cross-origin requests.
-    e.g. 'https:\\/\\/.*\\.example\\.org'
+    Specify explicit origins; the wildcard ['*'] is not allowed.
     """
 
     allow_credentials: bool | None = False
@@ -366,6 +361,17 @@ class Settings(BaseSettings):
     parallel_workers_timeout: int = 5
     """Grace timeout to wait until the workers shut down when stopping MLServer."""
 
+    model_operation_timeout: float = Field(
+        default=DEFAULT_MODEL_OPERATION_TIMEOUT, gt=0
+    )
+    """Maximum time in seconds for an accepted model lifecycle operation.
+
+    The timeout starts after the operation's top-level lock is acquired.
+    """
+
+    worker_start_timeout: float = Field(default=DEFAULT_WORKER_START_TIMEOUT, gt=0)
+    """Maximum time in seconds to initialize a worker and replay model state."""
+
     environments_dir: str = DEFAULT_ENVIRONMENTS_DIR
     """
     Directory used to store custom environments.
@@ -387,7 +393,16 @@ class Settings(BaseSettings):
     """Extra parameters for model repository."""
 
     load_models_at_startup: bool = True
-    """Flag to load all available models automatically at startup."""
+    """
+    Flag to load all available models from the model repository automatically
+    at startup. Only the `mlserver start` command reads this flag.
+    `MLServer.start()` loads just the models passed to it, whatever this is set
+    to.
+
+    If False, `mlserver start` starts the server with an empty model registry,
+    and models can be loaded later through the model repository API. While the
+    registry is empty, readiness follows `empty_registry_readiness`.
+    """
 
     empty_registry_readiness: bool = True
     """
@@ -395,19 +410,39 @@ class Settings(BaseSettings):
     If True (default), the server reports ready when the model registry is empty.
     If False, the server reports not ready when the model registry is empty.
 
-    Note: This flag only applies AFTER server startup completes. During startup,
-    an empty registry always reports not ready to prevent race conditions.
+    Set this to False to require that models are present, e.g. when they are
+    expected to be loaded at startup. While the registry is empty, orchestrators
+    that use the readiness check (e.g. a Kubernetes Service) stop routing traffic
+    to the server, so models cannot be loaded into it through that route. Keep
+    this True to load models dynamically into an empty server.
+
+    Note: This flag applies in both strict and lenient readiness modes, but only
+    AFTER server startup completes. During startup, the server always reports not
+    ready.
     """
 
     strict_readiness: bool = True
     """
-    Flag to control readiness check behavior for loaded models.
-    If True (default), ALL models must be ready for health check to pass.
-    If False, AT LEAST ONE model must be ready for health check to pass.
+    Flag to control how model state affects the server readiness check.
+    If True (default), the server is ready only if every model in the registry is
+    ready, as the V2 inference protocol requires.
+    If False, model state is ignored for readiness.
 
-    Note: During server startup, readiness is always strict (all models must be ready)
-    regardless of this setting. This prevents race conditions during startup failures.
-    After startup completes, this setting takes effect.
+    Set this to False when models are loaded dynamically after startup.
+    A new model or model version is not ready while it loads, so with True the
+    server is not ready during the load. With False it stays ready, so the
+    traffic to the server is not blocked, including requests to
+    already loaded models and future model lifecycle operations. This
+    deliberately departs from the V2 protocol. Check individual models through
+    the model ready endpoint.
+
+    Readiness only gates routing to the server. It does not change which version
+    a request without a version resolves to: that is always the default (latest)
+    registered version, even while it is still loading.
+
+    An empty registry follows `empty_registry_readiness` in both modes.
+
+    Note: In both modes the server reports not ready until startup completes.
     """
 
     # Server metadata
@@ -535,27 +570,17 @@ class Settings(BaseSettings):
     """Enable GZipMiddleware."""
 
     @model_validator(mode="after")
-    def validate_no_wildcard_cors_in_production_mode(self) -> Self:
+    def validate_no_wildcard_cors(self) -> Self:
         """
-        Prevent wildcard CORS configurations in PRODUCTION mode.
+        Prevent wildcard CORS origins.
 
-        Wildcard CORS origins allow any website to make cross-origin requests,
-        which is inappropriate for production deployments.
+        The '*' origin lets browser scripts from any origin read permitted
+        responses, which is inappropriate for a production-ready server.
         """
-        allowed = _load_image_baked_allowed_model_implementations(
-            _get_trusted_runtimes_artifact_path()
-        )
-
-        # Only enforce in PRODUCTION mode (when allowlist file exists)
-        if allowed is not None and self.cors_settings is not None:
+        if self.cors_settings is not None:
             if "*" in (self.cors_settings.allow_origins or []):
                 raise ValueError(
-                    "Wildcard CORS origins ['*'] not allowed in PRODUCTION mode. "
-                    "Specify explicit allowed origins or disable CORS settings."
-                )
-            if self.cors_settings.allow_origin_regex is not None:
-                raise ValueError(
-                    "CORS origin regex patterns not allowed in PRODUCTION mode. "
+                    "Wildcard CORS origins ['*'] not allowed. "
                     "Specify explicit allowed origins or disable CORS settings."
                 )
 
