@@ -28,7 +28,9 @@ Unload-all first joins unfinished preparation and cleanup. It retries every
 settled failed owner and attempts every committed version even if a retry fails.
 Failed owners remain tracked; the first retained failure is reported after the
 independent attempts finish. A deadline while waiting for uncertain work does not
-start those independent mutations.
+start those independent mutations. Once instances are selected for bulk removal,
+each receives a cleanup owner before the next await, so interruption cannot drop
+an instance whose unload coroutine has not started.
 
 Extension hooks must not leave unowned detached native work after returning or
 raising. Wrappers must own the resources they replace. Arbitrary detached tasks

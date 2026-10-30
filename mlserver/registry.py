@@ -344,8 +344,12 @@ class SingleModelRegistry:
         # Perform all unloads concurrently and wait for results to ensure
         # state is properly maintained
         try:
+            # Transfer every selected instance to a resource owner before the
+            # next await. Cancellation can otherwise stop an unload coroutine
+            # before it starts, while the finally block removes its registration.
+            cleanup = [self._start_unload(model) for model in models]
             results = await asyncio.gather(
-                *[self._unload_model(model) for model in models],
+                *(asyncio.shield(task) for task in cleanup if task is not None),
                 return_exceptions=True,
             )
             unload_failures = [r for r in results if isinstance(r, BaseException)]
@@ -446,11 +450,21 @@ class SingleModelRegistry:
         rollback: bool = False,
         preparation: asyncio.Task | None = None,
     ):
+        task = self._start_unload(model, rollback, preparation)
+        if task is not None:
+            await asyncio.shield(task)
+
+    def _start_unload(
+        self,
+        model: MLModel,
+        rollback: bool = False,
+        preparation: asyncio.Task | None = None,
+    ) -> asyncio.Task | None:
         version = _get_version(model.settings) or ""
         pending = self._pending_reload.get(version)
         if rollback:
             if not self._remove_pending(model):
-                return
+                return None
         elif pending is not None and pending is not model and pending.ready:
             # Publication precedes old-generation cleanup. A cleanup failure
             # must never roll back this successfully prepared replacement.
@@ -461,7 +475,7 @@ class SingleModelRegistry:
         else:
             self._unregister(model)
         model.ready = False
-        await asyncio.shield(self._start_cleanup(model, preparation))
+        return self._start_cleanup(model, preparation)
 
     def _start_cleanup(
         self,

@@ -622,3 +622,50 @@ async def test_unload_all_waits_for_preparation_before_independent_cleanup(
         registry._model_operation_timeout = 5
         if healthy.name in registry._models:
             await registry.unload(healthy.name)
+
+
+async def test_interrupted_unload_all_owns_every_selected_instance(
+    sum_model_settings, monkeypatch
+):
+    registry = MultiModelRegistry()
+    models = []
+    cleaned = []
+    for version in ("1", "2"):
+        settings = sum_model_settings.model_copy(deep=True)
+        settings.parameters.version = version
+        model = await registry.load(settings)
+        models.append(model)
+        event = asyncio.Event()
+        cleaned.append(event)
+
+        async def unload(event=event):
+            event.set()
+            return True
+
+        monkeypatch.setattr(model, "unload", unload)
+    single = registry._models[sum_model_settings.name]
+    get_models = single.get_models
+
+    async def interrupt_after_selection():
+        selected = await get_models()
+        # Model-operation deadlines cancel this accepted task. Reach the same
+        # interruption point deterministically, before any unload child starts.
+        asyncio.current_task().cancel()
+        return selected
+
+    monkeypatch.setattr(single, "get_models", interrupt_after_selection)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await registry.unload(sum_model_settings.name)
+        monkeypatch.setattr(single, "get_models", get_models)
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in cleaned)), 5)
+        assert all(not model.ready for model in models)
+        assert await registry.get_models() == []
+    finally:
+        monkeypatch.setattr(single, "get_models", get_models)
+        if sum_model_settings.name in registry._models:
+            await registry.unload(sum_model_settings.name)
+        # Also release test-owned instances on the affected implementation.
+        for model in models:
+            if model.ready:
+                await model.unload()
