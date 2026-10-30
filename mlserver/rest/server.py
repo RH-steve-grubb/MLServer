@@ -37,19 +37,42 @@ class RESTServer:
 
     async def add_custom_handlers(self, model: MLModel) -> MLModel:
         handlers = get_custom_handlers(model)
-        for custom_handler, handler_method in handlers:
-            self._app.add_api_route(
-                custom_handler.rest_path,
-                handler_method,
-                methods=[custom_handler.rest_method],
-            )
+        if not handlers:
+            return model
+        try:
+            for custom_handler, handler_method in handlers:
+                self._app.add_api_route(
+                    custom_handler.rest_path,
+                    handler_method,
+                    methods=[custom_handler.rest_method],
+                )
+        except Exception:
+            self._delete_custom_handlers(model)
+            raise
+
+        previous = model._on_load_failed
+
+        def discard() -> None:
+            # Routes call the instance directly, bypassing registry lookup.
+            # Revoke them before waiting for abandoned native preparation;
+            # retaining resource ownership must not retain serving eligibility.
+            try:
+                self._delete_custom_handlers(model)
+            finally:
+                previous()
+
+        model._on_load_failed = discard
 
         return model
 
     async def delete_custom_handlers(self, model: MLModel) -> MLModel:
+        self._delete_custom_handlers(model)
+        return model
+
+    def _delete_custom_handlers(self, model: MLModel) -> None:
         handlers = get_custom_handlers(model)
         if len(handlers) == 0:
-            return model
+            return
 
         # NOTE: Loop in reverse, so that it's quicker to find all the recently
         # added routes and we can remove routes on-the-fly
@@ -58,8 +81,6 @@ class RESTServer:
                 if matches(route, custom_handler, handler_method):  # type: ignore
                     self._app.routes.pop(i)
                     handlers.pop(j)
-
-        return model
 
     async def start(self):
         cfg = self._get_config()

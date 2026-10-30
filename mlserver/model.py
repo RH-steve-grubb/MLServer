@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from .codecs import (
@@ -50,6 +50,7 @@ class MLModel:
 
     def __init__(self, settings: ModelSettings):
         self._settings = settings
+        self._on_load_failed: Callable[[], None] = lambda: None
         self._inputs_index: dict[str, MetadataTensor] = {}
 
         self._inputs_index = _generate_metadata_index(self._settings.inputs)
@@ -116,6 +117,7 @@ class MLModel:
 
     def _load_failed(self) -> None:
         """Internal notification that registry preparation was abandoned."""
+        self._on_load_failed()
 
     async def unload(self) -> bool:
         """

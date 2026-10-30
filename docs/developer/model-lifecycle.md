@@ -28,6 +28,11 @@ Extension hooks must not leave unowned detached native work after returning or
 raising. Wrappers must own the resources they replace. Arbitrary detached tasks
 created by extensions are not covered by the nested timeout contract.
 
+Custom REST routes bind directly to instances. Load abandonment revokes those
+routes immediately, independently of cleanup waiting for native preparation.
+Removal matches the instance's bound handlers, preserving committed routes for
+other instances. Partial route-registration failure also revokes routes it added.
+
 ## Worker recovery
 
 A pool retains its dispatched update waiter after frontend timeout. It immediately
