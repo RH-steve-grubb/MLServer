@@ -86,6 +86,10 @@ components:
       properties:
         ready:
           type: boolean
+        include_registry_models:
+          type: boolean
+          default: false
+          description: MLServer extension; include registry models when true.
     RepositoryIndexResponse:
       title: RepositoryIndexResponse
       type: array
@@ -124,7 +128,6 @@ components:
           type: string
 tags:
   - name: extension
-    description: MLServer-specific extensions to the V2 Inference Protocol
   - name: model
   - name: model-repository
   - name: server

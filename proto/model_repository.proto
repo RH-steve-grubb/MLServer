@@ -25,6 +25,11 @@ message RepositoryIndexRequest
 
   // If true return only models currently ready for inferencing.
   bool ready = 2;
+
+  // MLServer-specific extension. Defaults to false. If true, include all
+  // currently registered models, including models absent from the repository.
+  // If ready is true, only READY models from the selected set are returned.
+  bool include_registry_models = 3;
 }
 
 message RepositoryIndexResponse

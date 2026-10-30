@@ -232,13 +232,38 @@ async def test_model_stream_infer_error(inference_service_stub, model_generate_r
     assert err.value.details() == "Model my-model with version v1.2.3 not found"
 
 
+@pytest.mark.parametrize("include_registry_models", [False, True])
+@pytest.mark.parametrize("ready", [False, True])
 async def test_model_repository_index(
     inference_service_stub,
     grpc_repository_index_request,
+    model_registry,
+    sum_model_settings,
+    include_registry_models,
+    ready,
 ):
-    index = await inference_service_stub.RepositoryIndex(grpc_repository_index_request)
+    await model_registry.unload(sum_model_settings.name)
 
-    assert len(index.models) == 1
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+    grpc_repository_index_request.include_registry_models = include_registry_models
+    grpc_repository_index_request.ready = ready
+
+    try:
+        index = await inference_service_stub.RepositoryIndex(
+            grpc_repository_index_request
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
+
+    expected_names = set()
+    if include_registry_models:
+        expected_names.add(registry_only_settings.name)
+    if not ready:
+        expected_names.add(sum_model_settings.name)
+
+    assert {model.name for model in index.models} == expected_names
 
 
 async def test_model_repository_unload(inference_service_stub, sum_model_settings):

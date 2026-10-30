@@ -79,6 +79,26 @@ All REST endpoints live under the `/v2` prefix and follow the V2 Inference Proto
 | POST | `/v2/repository/models/{model_name}/load` | Load model | `200` / `400` |
 | POST | `/v2/repository/models/{model_name}/unload` | Unload model | `200` / `400` |
 
+#### Repository index request
+
+The repository index request supports the standard `ready` field and the
+MLServer-specific `include_registry_models` extension:
+
+```json
+{
+  "ready": false,
+  "include_registry_models": false
+}
+```
+
+- `include_registry_models` defaults to `false`, so the index lists only
+  models discovered in the model repository.
+- When `true`, the index also includes currently registered models in the
+  model registry, including models that are absent from the repository.
+- When `ready` is `true`, only `READY` models from the selected set are
+  returned. When `ready` is omitted or `false`, all selected models and their
+  current states are returned.
+
 ### Documentation Endpoints
 
 | Method | Path | Description |
@@ -198,7 +218,7 @@ All REST endpoints live under the `/v2` prefix and follow the V2 Inference Proto
 **Request:**
 ```json
 {
-  "ready": true
+  "ready": false
 }
 ```
 

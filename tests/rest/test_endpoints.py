@@ -267,18 +267,86 @@ async def test_infer_error(
     assert response.json()["error"] == "Model my-model with version v0 not found"
 
 
-async def test_model_repository_index(
-    rest_client: AsyncClient, repository_index_request: RepositoryIndexRequest
+async def test_model_repository_index_excludes_registry_models_by_default(
+    rest_client: AsyncClient,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry,
+    sum_model_settings: ModelSettings,
 ):
-    endpoint = "/v2/repository/index"
-    response = await rest_client.post(
-        endpoint, json=repository_index_request.model_dump()
-    )
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+
+    try:
+        response = await rest_client.post(
+            "/v2/repository/index",
+            json=repository_index_request.model_dump(
+                exclude={"include_registry_models"}
+            ),
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
 
     assert response.status_code == 200
+    assert [model["name"] for model in response.json()] == [sum_model_settings.name]
 
-    models = response.json()
-    assert len(models) == 1
+
+async def test_model_repository_index_includes_registry_models(
+    rest_client: AsyncClient,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry,
+    sum_model_settings: ModelSettings,
+):
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+    repository_index_request.include_registry_models = True
+
+    try:
+        response = await rest_client.post(
+            "/v2/repository/index",
+            json=repository_index_request.model_dump(),
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
+
+    assert response.status_code == 200
+    assert {model["name"] for model in response.json()} == {
+        sum_model_settings.name,
+        registry_only_settings.name,
+    }
+
+
+@pytest.mark.parametrize("ready", [False, True])
+async def test_model_repository_index_ready_filters_selected_models(
+    rest_client: AsyncClient,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry,
+    sum_model_settings: ModelSettings,
+    ready: bool,
+):
+    await model_registry.unload(sum_model_settings.name)
+
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+    repository_index_request.include_registry_models = True
+    repository_index_request.ready = ready
+
+    try:
+        response = await rest_client.post(
+            "/v2/repository/index",
+            json=repository_index_request.model_dump(),
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
+
+    assert response.status_code == 200
+    expected_names = {registry_only_settings.name}
+    if not ready:
+        expected_names.add(sum_model_settings.name)
+
+    assert {model["name"] for model in response.json()} == expected_names
 
 
 async def test_model_repository_unload(

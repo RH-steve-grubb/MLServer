@@ -38,15 +38,18 @@ class ModelRepositoryHandlers:
         # Get models from repository (on disk)
         repository_model_settings = await self._repository.list()
 
-        # Get all models from registry
-        registry_model_settings = [
-            m.settings for m in await self._model_registry.get_models()
-        ]
+        if payload.include_registry_models:
+            # Get all models from registry
+            registry_model_settings = [
+                m.settings for m in await self._model_registry.get_models()
+            ]
 
-        # Union and deduplicate models by (name, version)
-        all_model_settings = self._union_model_settings(
-            repository_model_settings, registry_model_settings
-        )
+            # Union and deduplicate models by (name, version)
+            all_model_settings = self._union_model_settings(
+                repository_model_settings, registry_model_settings
+            )
+        else:
+            all_model_settings = repository_model_settings
 
         # Convert to index items
         index_items = []

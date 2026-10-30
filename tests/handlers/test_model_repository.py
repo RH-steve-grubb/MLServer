@@ -39,6 +39,101 @@ async def test_index_unavailable_model(
     assert repo_index[0].state == State.UNAVAILABLE
 
 
+async def test_index_excludes_registry_only_models(
+    model_repository_handlers: ModelRepositoryHandlers,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry: MultiModelRegistry,
+    sum_model_settings: ModelSettings,
+):
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+
+    try:
+        repo_index = list(
+            await model_repository_handlers.index(repository_index_request)
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
+
+    assert [item.name for item in repo_index] == [sum_model_settings.name]
+
+
+async def test_index_includes_registry_only_models_when_requested(
+    model_repository_handlers: ModelRepositoryHandlers,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry: MultiModelRegistry,
+    sum_model_settings: ModelSettings,
+):
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+    repository_index_request.include_registry_models = True
+
+    try:
+        repo_index = list(
+            await model_repository_handlers.index(repository_index_request)
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
+
+    assert {item.name for item in repo_index} == {
+        sum_model_settings.name,
+        registry_only_settings.name,
+    }
+
+
+async def test_index_ready_filters_repository_and_registry_models(
+    model_repository_handlers: ModelRepositoryHandlers,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry: MultiModelRegistry,
+    sum_model_settings: ModelSettings,
+):
+    await model_repository_handlers.unload(sum_model_settings.name)
+
+    registry_only_settings = sum_model_settings.copy(deep=True)
+    registry_only_settings.name = "registry-only-model"
+    await model_registry.load(registry_only_settings)
+
+    repository_index_request.include_registry_models = True
+    repository_index_request.ready = True
+    try:
+        repo_index = list(
+            await model_repository_handlers.index(repository_index_request)
+        )
+    finally:
+        await model_registry.unload(registry_only_settings.name)
+
+    assert [item.name for item in repo_index] == [registry_only_settings.name]
+    assert repo_index[0].state == State.READY
+
+
+async def test_index_ready_excludes_not_ready_registry_models(
+    model_repository_handlers: ModelRepositoryHandlers,
+    repository_index_request: RepositoryIndexRequest,
+    model_registry: MultiModelRegistry,
+    sum_model_settings: ModelSettings,
+):
+    not_ready_settings = sum_model_settings.copy(deep=True)
+    not_ready_settings.name = "not-ready-model"
+    await model_registry.load(not_ready_settings)
+    not_ready_model = await model_registry.get_model(not_ready_settings.name)
+    not_ready_model.ready = False
+
+    try:
+        repository_index_request.include_registry_models = True
+        repository_index_request.ready = True
+
+        repo_index = list(
+            await model_repository_handlers.index(repository_index_request)
+        )
+
+        assert [item.name for item in repo_index] == [sum_model_settings.name]
+        assert repo_index[0].state == State.READY
+    finally:
+        await model_registry.unload(not_ready_settings.name)
+
+
 @pytest.mark.parametrize("ready,expected", [(None, 1), (True, 0), (False, 1)])
 async def test_index_filter_ready(
     model_repository_handlers: ModelRepositoryHandlers,

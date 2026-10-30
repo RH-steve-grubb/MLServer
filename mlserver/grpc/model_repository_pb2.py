@@ -19,7 +19,7 @@ _sym_db = _symbol_database.Default()
 
 
 DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(
-    b'\n\x16model_repository.proto\x12\x1ainference.model_repository"@\n\x16RepositoryIndexRequest\x12\x17\n\x0frepository_name\x18\x01 \x01(\t\x12\r\n\x05ready\x18\x02 \x01(\x08"\xb5\x01\n\x17RepositoryIndexResponse\x12N\n\x06models\x18\x01 \x03(\x0b\x32>.inference.model_repository.RepositoryIndexResponse.ModelIndex\x1aJ\n\nModelIndex\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\r\n\x05state\x18\x03 \x01(\t\x12\x0e\n\x06reason\x18\x04 \x01(\t"I\n\x1aRepositoryModelLoadRequest\x12\x17\n\x0frepository_name\x18\x01 \x01(\t\x12\x12\n\nmodel_name\x18\x02 \x01(\t"\x1d\n\x1bRepositoryModelLoadResponse"K\n\x1cRepositoryModelUnloadRequest\x12\x17\n\x0frepository_name\x18\x01 \x01(\t\x12\x12\n\nmodel_name\x18\x02 \x01(\t"\x1f\n\x1dRepositoryModelUnloadResponse2\xb2\x03\n\x16ModelRepositoryService\x12|\n\x0fRepositoryIndex\x12\x32.inference.model_repository.RepositoryIndexRequest\x1a\x33.inference.model_repository.RepositoryIndexResponse"\x00\x12\x88\x01\n\x13RepositoryModelLoad\x12\x36.inference.model_repository.RepositoryModelLoadRequest\x1a\x37.inference.model_repository.RepositoryModelLoadResponse"\x00\x12\x8e\x01\n\x15RepositoryModelUnload\x12\x38.inference.model_repository.RepositoryModelUnloadRequest\x1a\x39.inference.model_repository.RepositoryModelUnloadResponse"\x00\x62\x06proto3'
+    b'\n\x16model_repository.proto\x12\x1ainference.model_repository"a\n\x16RepositoryIndexRequest\x12\x17\n\x0frepository_name\x18\x01 \x01(\t\x12\r\n\x05ready\x18\x02 \x01(\x08\x12\x1f\n\x17include_registry_models\x18\x03 \x01(\x08"\xb5\x01\n\x17RepositoryIndexResponse\x12N\n\x06models\x18\x01 \x03(\x0b\x32>.inference.model_repository.RepositoryIndexResponse.ModelIndex\x1aJ\n\nModelIndex\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x0f\n\x07version\x18\x02 \x01(\t\x12\r\n\x05state\x18\x03 \x01(\t\x12\x0e\n\x06reason\x18\x04 \x01(\t"I\n\x1aRepositoryModelLoadRequest\x12\x17\n\x0frepository_name\x18\x01 \x01(\t\x12\x12\n\nmodel_name\x18\x02 \x01(\t"\x1d\n\x1bRepositoryModelLoadResponse"K\n\x1cRepositoryModelUnloadRequest\x12\x17\n\x0frepository_name\x18\x01 \x01(\t\x12\x12\n\nmodel_name\x18\x02 \x01(\t"\x1f\n\x1dRepositoryModelUnloadResponse2\xb2\x03\n\x16ModelRepositoryService\x12|\n\x0fRepositoryIndex\x12\x32.inference.model_repository.RepositoryIndexRequest\x1a\x33.inference.model_repository.RepositoryIndexResponse"\x00\x12\x88\x01\n\x13RepositoryModelLoad\x12\x36.inference.model_repository.RepositoryModelLoadRequest\x1a\x37.inference.model_repository.RepositoryModelLoadResponse"\x00\x12\x8e\x01\n\x15RepositoryModelUnload\x12\x38.inference.model_repository.RepositoryModelUnloadRequest\x1a\x39.inference.model_repository.RepositoryModelUnloadResponse"\x00\x62\x06proto3'
 )
 
 _globals = globals()
@@ -28,19 +28,19 @@ _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, "model_repository_pb2", _glo
 if not _descriptor._USE_C_DESCRIPTORS:
     DESCRIPTOR._loaded_options = None
     _globals["_REPOSITORYINDEXREQUEST"]._serialized_start = 54
-    _globals["_REPOSITORYINDEXREQUEST"]._serialized_end = 118
-    _globals["_REPOSITORYINDEXRESPONSE"]._serialized_start = 121
-    _globals["_REPOSITORYINDEXRESPONSE"]._serialized_end = 302
-    _globals["_REPOSITORYINDEXRESPONSE_MODELINDEX"]._serialized_start = 228
-    _globals["_REPOSITORYINDEXRESPONSE_MODELINDEX"]._serialized_end = 302
-    _globals["_REPOSITORYMODELLOADREQUEST"]._serialized_start = 304
-    _globals["_REPOSITORYMODELLOADREQUEST"]._serialized_end = 377
-    _globals["_REPOSITORYMODELLOADRESPONSE"]._serialized_start = 379
-    _globals["_REPOSITORYMODELLOADRESPONSE"]._serialized_end = 408
-    _globals["_REPOSITORYMODELUNLOADREQUEST"]._serialized_start = 410
-    _globals["_REPOSITORYMODELUNLOADREQUEST"]._serialized_end = 485
-    _globals["_REPOSITORYMODELUNLOADRESPONSE"]._serialized_start = 487
-    _globals["_REPOSITORYMODELUNLOADRESPONSE"]._serialized_end = 518
-    _globals["_MODELREPOSITORYSERVICE"]._serialized_start = 521
-    _globals["_MODELREPOSITORYSERVICE"]._serialized_end = 955
+    _globals["_REPOSITORYINDEXREQUEST"]._serialized_end = 151
+    _globals["_REPOSITORYINDEXRESPONSE"]._serialized_start = 154
+    _globals["_REPOSITORYINDEXRESPONSE"]._serialized_end = 335
+    _globals["_REPOSITORYINDEXRESPONSE_MODELINDEX"]._serialized_start = 261
+    _globals["_REPOSITORYINDEXRESPONSE_MODELINDEX"]._serialized_end = 335
+    _globals["_REPOSITORYMODELLOADREQUEST"]._serialized_start = 337
+    _globals["_REPOSITORYMODELLOADREQUEST"]._serialized_end = 410
+    _globals["_REPOSITORYMODELLOADRESPONSE"]._serialized_start = 412
+    _globals["_REPOSITORYMODELLOADRESPONSE"]._serialized_end = 441
+    _globals["_REPOSITORYMODELUNLOADREQUEST"]._serialized_start = 443
+    _globals["_REPOSITORYMODELUNLOADREQUEST"]._serialized_end = 518
+    _globals["_REPOSITORYMODELUNLOADRESPONSE"]._serialized_start = 520
+    _globals["_REPOSITORYMODELUNLOADRESPONSE"]._serialized_end = 551
+    _globals["_MODELREPOSITORYSERVICE"]._serialized_start = 554
+    _globals["_MODELREPOSITORYSERVICE"]._serialized_end = 988
 # @@protoc_insertion_point(module_scope)
