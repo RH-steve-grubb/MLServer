@@ -2,6 +2,7 @@ import pytest
 import sys
 import os
 import shutil
+import gc
 
 from mlserver.env import Environment, compute_hash_of_file
 
@@ -91,3 +92,64 @@ def test_activate_env(env: Environment):
 
     assert env._env_path not in ",".join(sys.path)
     assert env._env_path not in os.environ["PATH"]
+
+
+@pytest.mark.parametrize("delete_env", [True, False])
+def test_close_revokes_stale_directory_deletion(tmp_path, delete_env):
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned", delete_env=delete_env)
+    env.close()
+    assert path.exists() is not delete_env
+    env.close()
+    path.mkdir(exist_ok=True)
+    (path / "new-owner").touch()
+    del env
+    gc.collect()
+    assert (path / "new-owner").exists()
+
+
+def test_failed_close_retains_directory_owner(tmp_path, monkeypatch):
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned")
+
+    def fail(*args, **kwargs):
+        raise OSError("cannot remove environment yet")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mlserver.env.shutil.rmtree", fail)
+        with pytest.raises(OSError, match="cannot remove"):
+            env.close()
+    assert path.exists()
+    env.close()
+    assert not path.exists()
+
+
+def test_worker_copy_cannot_release_parent_environment(tmp_path):
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned")
+    env._owner_pid = os.getpid() + 1
+    env.close()
+    assert path.exists()
+    env._owner_pid = os.getpid()
+    env.close()
+    assert not path.exists()
+
+
+def test_missing_child_during_release_keeps_directory_owned(tmp_path, monkeypatch):
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned")
+
+    def fail(*args, **kwargs):
+        raise FileNotFoundError("a nested entry disappeared")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mlserver.env.shutil.rmtree", fail)
+        with pytest.raises(FileNotFoundError, match="nested entry"):
+            env.close()
+    assert path.exists()
+    env.close()
+    assert not path.exists()

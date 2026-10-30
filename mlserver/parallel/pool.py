@@ -667,6 +667,11 @@ class InferencePool:
             # their directory too if cleanup did not confirm their release.
             self._transport_directory.cleanup()
 
+        if self._env is not None:
+            # Release before the registry allows this hash to be reused.
+            # On failed/uncertain close the environment remains owned above.
+            self._env.close()
+
     async def _close_workers(self):
         cleanup_errors: list[BaseException] = []
         self._closing_workers.update(self._workers)

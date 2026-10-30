@@ -64,6 +64,7 @@ class Environment:
     """
 
     def __init__(self, env_path: str, env_hash: str, delete_env: bool = True):
+        self._owner_pid = os.getpid()
         self._delete_env = delete_env
         self._env_path = env_path
         self.env_hash = env_hash
@@ -150,7 +151,20 @@ class Environment:
         sys.path = self._prev_sys_path
         os.environ["PATH"] = self._prev_bin_path
 
-    def __del__(self) -> None:
+    def close(self) -> None:
+        """Release an owned directory once, after its consumers have exited."""
+        # Workers receive a copy during spawn; deletion belongs to the parent.
+        if not self._delete_env or self._owner_pid != os.getpid():
+            return
         logger.info("Cleaning up environment")
-        if self._delete_env:
+        try:
             shutil.rmtree(self._env_path)
+        except FileNotFoundError:
+            if os.path.lexists(self._env_path):
+                raise
+        # Old models and callbacks may retain this object after path reuse.
+        # Successful release must revoke their ability to delete that path.
+        self._delete_env = False
+
+    def __del__(self) -> None:
+        self.close()

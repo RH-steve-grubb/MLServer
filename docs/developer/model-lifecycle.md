@@ -105,6 +105,12 @@ extractions retain their error and require removal of the incomplete directory
 before retrying in a new registry. Close bounds its wait for extraction and reports
 any unsettled owner without cancelling the underlying thread.
 
+Successful pool close explicitly releases its extracted directory after resource
+cleanup, before the pool key can be reused. Release revokes deletion authority on
+retained old environment objects; collection cannot delete a later extraction.
+Failed close retains that authority and blocks reuse. Borrowed directories are
+never deleted, and worker copies cannot release their parent's directory.
+
 Cancelling an owned local cleanup task also preserves its preparation reference.
 A retry joins preparation before releasing resources. If preparation itself is
 cancelled by external code, native completion cannot be established: cleanup
