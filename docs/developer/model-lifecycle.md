@@ -143,3 +143,8 @@ writers. Pool shutdown and worker retirement close obsolete parent readers only
 after exit, then join each feeder with a bound before releasing its owner. A feeder
 which cannot stop remains owned and reported. This also prevents interpreter-exit
 queue finalizers from silently waiting on a dead consumer.
+
+The feeder and retirement owner serialize closure of each parent reader. Native
+descriptor close can release the GIL between checking and clearing the handle;
+concurrent close calls could otherwise close the same descriptor twice. The lock
+is installed before the feeder starts and adds no work to prediction dispatch.

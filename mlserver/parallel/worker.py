@@ -5,6 +5,8 @@ import signal
 from asyncio import Task, CancelledError
 from collections.abc import Awaitable, Callable, Sequence
 from multiprocessing import Process, Queue
+from multiprocessing.connection import Connection
+from threading import Lock
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -38,6 +40,22 @@ def _noop():
     pass
 
 
+def _serialize_connection_close(connection: Connection) -> None:
+    close = connection.close
+    lock = Lock()
+
+    def close_once() -> None:
+        # Connection.close checks and clears its descriptor around a native
+        # close which can release the GIL. The feeder and retirement owner
+        # must not both pass that check and close the same descriptor.
+        with lock:
+            close()
+
+    # Install before the feeder captures its closer. Multiprocessing's
+    # Connection reducer transfers the descriptor, not this parent-only lock.
+    setattr(connection, "close", close_once)
+
+
 class Worker(Process):
     def __init__(
         self,
@@ -63,6 +81,7 @@ class Worker(Process):
         self._requests: Queue[ModelRequestMessage] = Queue()
         self._model_updates: Queue[ModelUpdateMessage] = Queue()
         for queue in [self._requests, self._model_updates]:
+            _serialize_connection_close(getattr(queue, "_reader"))
             # WorkerStop reports delivery failures. After confirmed consumer
             # exit, retirement deliberately breaks obsolete blocked writes.
             setattr(queue, "_ignore_epipe", True)

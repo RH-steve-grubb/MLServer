@@ -1,6 +1,7 @@
 """Real pipe backpressure while a worker is blocked in native preparation."""
 
 import asyncio
+import os
 from pathlib import Path
 import threading
 
@@ -8,6 +9,80 @@ from mlserver.parallel.messages import ModelRequestMessage
 from mlserver.parallel.pool import InferencePool
 
 from tests.fixtures import SumModel
+
+
+async def test_retirement_does_not_race_feeder_connection_close(
+    settings, sum_model_settings, monkeypatch
+):
+    from mlserver.parallel import worker as worker_module
+
+    # Observe both contenders before either can win native descriptor cleanup.
+    # The production lock, when present, is still a real threading lock.
+    entered, contended, release = (
+        threading.Event(),
+        threading.Event(),
+        threading.Event(),
+    )
+    locks = []
+
+    class ObservedLock:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.attempts = 0
+            locks.append(self)
+
+        def __enter__(self):
+            self.attempts += 1
+            if self is locks[1] and self.attempts == 2:
+                contended.set()
+            self.lock.acquire()
+
+        def __exit__(self, *args):
+            self.lock.release()
+
+    monkeypatch.setattr(worker_module, "Lock", ObservedLock, raising=False)
+    settings.parallel_workers = 1
+    pool = InferencePool(settings)
+    worker = next(iter(pool._workers.values()))
+    queue = worker._model_updates
+    reader = queue._reader
+    native_calls = []
+    retirement = None
+
+    def native_close():
+        # Connection.close reads the descriptor before its native close can
+        # release the GIL. Pause that interval to force the competing closer.
+        descriptor = reader.fileno()
+        native_calls.append(descriptor)
+        if len(native_calls) == 1:
+            entered.set()
+            assert release.wait(10)
+        else:
+            contended.set()
+        os.close(descriptor)
+
+    try:
+        await pool.load_model(SumModel(sum_model_settings))
+        worker.kill()
+        await asyncio.to_thread(worker.join, 5)
+        assert worker.exitcode is not None
+        monkeypatch.setattr(reader, "_close", native_close)
+        queue.close()
+        assert await asyncio.to_thread(entered.wait, 5)
+        retirement = asyncio.create_task(
+            asyncio.to_thread(lambda: asyncio.run(worker.retire_queues(5)))
+        )
+        assert await asyncio.to_thread(contended.wait, 5)
+        assert len(native_calls) == 1
+        release.set()
+        await asyncio.wait_for(retirement, 10)
+        assert not queue._thread.is_alive()
+        assert len(native_calls) == 1
+    finally:
+        release.set()
+        if retirement is not None:
+            await asyncio.gather(retirement, return_exceptions=True)
+        await pool.close()
 
 
 async def block_worker(model):
