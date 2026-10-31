@@ -48,6 +48,7 @@ async def test_restart_dependency_retains_capacity_or_joins_close(
         settings,
         on_worker_load=[controlled_worker_load] if dependency == "recovery" else [],
     )
+    await pool.start()
     original_workers = list(pool._workers.values())
     spawned = []
     entered, release, started, recovery_entered, close_entered = (
@@ -205,6 +206,7 @@ async def test_close_during_native_start_joins_restart_owner(
     settings.worker_start_timeout = 3
     settings.parallel_workers_timeout = 1
     pool = InferencePool(settings, on_worker_load=[pause_replay])
+    await pool.start()
     original_workers = list(pool._workers.values())
     from mlserver.parallel import pool as pool_module
 
@@ -280,6 +282,7 @@ async def test_failed_restart_is_bounded_observable_and_not_retried(
     settings.model_operation_timeout = 15
     settings.worker_start_timeout = 3
     pool = InferencePool(settings, on_worker_load=[reject_replay])
+    await pool.start()
     original_workers = list(pool._workers.values())
     marker = tmp_path / "reject-replay"
     incoming = sum_model_settings.model_copy(deep=True)

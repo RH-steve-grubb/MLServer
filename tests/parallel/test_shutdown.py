@@ -2,6 +2,7 @@
 
 import asyncio
 from threading import Event
+from multiprocessing.queues import Queue
 
 from pytest_mock import MockerFixture
 
@@ -13,20 +14,21 @@ async def test_close_joins_blocked_response_reader_before_closing_queue(
     settings: Settings, mocker: MockerFixture
 ) -> None:
     pool = InferencePool(settings)
+    entered = Event()
+    original_get = Queue.get
+
+    def blocking_get(queue, *args, **kwargs):
+        if queue is pool._response_queue:
+            entered.set()
+        return original_get(queue, *args, **kwargs)
+
+    mocker.patch.object(Queue, "get", autospec=True, side_effect=blocking_get)
+    await pool.start()
     workers = list(pool._workers.values())
     dispatcher = pool._dispatcher
     response_task = dispatcher._process_responses_task
     assert response_task is not None
-    entered = Event()
-    original_get = pool._responses.get
-
-    def blocking_get():
-        entered.set()
-        return original_get()
-
-    # Construction schedules the response task, but this test has not yielded
-    # yet. Observe its real Queue.get(), with no model updates to wake it.
-    mocker.patch.object(pool._responses, "get", side_effect=blocking_get)
+    # Observe the first real Queue.get(), before activation starts its reader.
     original_close = pool._responses.close
     observations = []
 

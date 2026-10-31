@@ -61,6 +61,7 @@ async def running_pool(
     settings: Settings, sum_model: MLModel
 ) -> AsyncGenerator[RunningPool, None]:
     pool = InferencePool(settings)
+    await pool.start()
     assert pool._transport_directory is not None
     directory = Path(pool._transport_directory.name)
     initial_workers = list(pool._workers.values())
@@ -242,6 +243,7 @@ async def test_failed_close_retains_directory_for_live_workers(
 ) -> None:
     settings.parallel_workers = 1
     pool = InferencePool(settings)
+    await pool.start()
     assert pool._transport_directory is not None
     directory = Path(pool._transport_directory.name)
     workers = list(pool._workers.values())

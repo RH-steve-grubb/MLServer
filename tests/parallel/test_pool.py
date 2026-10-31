@@ -181,6 +181,7 @@ async def test_close_clears_tracking_when_worker_cleanup_fails(
     settings: Settings, sum_model: MLModel, mocker
 ):
     inference_pool = InferencePool(settings)
+    await inference_pool.start()
     inference_pool._worker_registry.add(sum_model.settings)
     inference_pool._pending_reload[inference_pool._model_key(sum_model.settings)] = (
         sum_model

@@ -398,27 +398,75 @@ async def test_parent_constructor_delays_receiver_and_close_releases_descriptors
         assert parent._receiver is receiver
         await parent.close()
         await parent.close()
+        assert parent._context is not None
         assert parent._context.closed and parent._replies.closed
         with pytest.raises(RuntimeError, match="unavailable"):
             parent.start(Mock(), Mock())
     assert len(list(Path("/proc/self/fd").iterdir())) <= before
 
 
-def test_parent_bind_failure_closes_sockets_and_context(directory: Path) -> None:
+async def test_parent_bind_failure_closes_sockets_and_context(directory: Path) -> None:
     before = len(list(Path("/proc/self/fd").iterdir()))
-    with pytest.raises(zmq.ZMQError):
-        transport.ParentTransport(f"ipc://{directory / 'missing' / 'reply.sock'}")
+    parent = transport.ParentTransport(f"ipc://{directory / 'missing' / 'reply.sock'}")
+    try:
+        with pytest.raises(zmq.ZMQError):
+            parent.start(Mock(), Mock())
+    finally:
+        await parent.close()
     assert len(list(Path("/proc/self/fd").iterdir())) <= before
 
 
-def test_parent_socket_creation_failure_releases_context() -> None:
+async def test_parent_socket_creation_failure_releases_context() -> None:
     context = Mock()
     with patch.object(
         transport.zmq.asyncio, "Context", return_value=context
     ), patch.object(transport, "_socket", side_effect=RuntimeError("socket failed")):
-        with pytest.raises(RuntimeError, match="socket failed"):
-            transport.ParentTransport("unused")
+        parent = transport.ParentTransport("unused")
+        try:
+            with pytest.raises(RuntimeError, match="socket failed"):
+                parent.start(Mock(), Mock())
+        finally:
+            await parent.close()
     context.term.assert_called_once()
+
+
+async def test_parent_close_waiter_cancellation_retains_native_cleanup(directory):
+    parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
+    parent.start(Mock(), Mock())
+    parent._receiver.cancel()
+    await asyncio.gather(parent._receiver, return_exceptions=True)
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def receiver():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    parent._receiver = asyncio.create_task(receiver())
+    await entered.wait()
+    first = asyncio.create_task(parent.close())
+    repeated = None
+    try:
+        await asyncio.wait_for(cleaning.wait(), 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        repeated = asyncio.create_task(parent.close())
+        await asyncio.sleep(0)
+        assert not repeated.done()
+        release.set()
+        await asyncio.wait_for(repeated, 5)
+        assert parent._context is not None and parent._context.closed
+        assert parent._replies.closed
+    finally:
+        release.set()
+        await asyncio.gather(
+            first, *([repeated] if repeated else []), return_exceptions=True
+        )
+        await parent.close()
 
 
 async def test_worker_partial_socket_setup_is_cleaned(directory: Path) -> None:

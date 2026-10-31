@@ -43,6 +43,31 @@ other instances. Partial route-registration failure also revokes routes it added
 
 ## Worker recovery
 
+Pool and worker constructors now create lightweight owners. Internal pool users
+await `start()` before using a dispatcher; normal `MLServer(settings)` followed
+by `await server.start(...)` is unchanged. `InferencePoolRegistry.load_model()`
+ensures activation itself, including for dynamic named/environment pools.
+The registry retains the pool under its key before activation. Same-key loads
+remain serialized. A retained initializing pool is not a committed model.
+
+Activation acquires the response queue and endpoints, then starts the owned
+dispatcher/transport before spawning children. Each worker is retained before
+queue allocation or `Process.start()`, including a start which raises after
+exposing a child. Never-started workers can retire acquired parent queues without
+claiming a child exited. SIGCHLD notifies starting and failed owners as well as
+active pools. Close prevents later spawning/publication and joins activation
+with the existing model-operation bound before attempting independent cleanup.
+
+Initialization failure preserves its primary exception; a secondary cleanup
+failure is available as `cleanup_error` and on the retained pool. Confirmed
+rollback removes a failed dynamic pool and permits retry. Failed cleanup keeps
+the key blocked, its resources/environment retained, and the same close failure
+observable to repeated callers. This is a recorded terminal failure, not an
+automatic retry or an assertion that resources were released. Native allocation
+failures without any returned handle/PID remain subject to the underlying
+library's partial-acquisition guarantees; asyncio cannot interrupt blocking native
+initialization. Borrowed environments are never deleted.
+
 A pool retains its dispatched update waiter after frontend timeout. It immediately
 removes all workers in that pool from routing. New pool mutations and replacement
 worker replay join this recovery. Committed replay settings are copied; a fresh

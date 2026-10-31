@@ -68,6 +68,9 @@ class InferencePoolRegistry:
             WeakValueDictionary()
         )
         self._closing = False
+        self._startup_lock = asyncio.Lock()
+        self._started = False
+        self._signal_installed = False
         self._close_task: asyncio.Task | None = None
         self._failed_pools: dict[str | None, InferencePool] = {}
         self._environment_tasks: dict[str, asyncio.Task[Environment]] = {}
@@ -83,8 +86,40 @@ class InferencePoolRegistry:
         )
         self._pools: dict[str, InferencePool] = {}
 
-        os.makedirs(self._settings.environments_dir, exist_ok=True)
+    @with_operation_lock(lambda self: self._startup_lock)
+    @defer_cancellation(lambda self: self._settings.model_operation_timeout)
+    async def start(self) -> None:
+        """Ensure activation for server startup and existing load_model users."""
+        if self._closing:
+            raise InferencePoolUnavailable()
+        if self._started:
+            return
+        if None in self._failed_pools:
+            raise InferencePoolUnavailable("default pool with failed cleanup")
+        if self._default_pool is None:
+            self._default_pool = InferencePool(
+                self._settings,
+                on_worker_stop=self._on_worker_stop,
+                on_worker_load=self._on_worker_load,
+                on_worker_unload=self._on_worker_unload,
+            )
+        try:
+            os.makedirs(self._settings.environments_dir, exist_ok=True)
+            self._install_signal_handler()
+            await self._default_pool.start()
+            if self._closing:
+                raise InferencePoolUnavailable()
+            self._started = True
+        except (Exception, asyncio.CancelledError) as primary:
+            try:
+                await self._close_pool(None)
+            except (Exception, asyncio.CancelledError) as cleanup:
+                setattr(primary, "cleanup_error", cleanup)
+            if not self._failed_pools:
+                self._restore_signal_handler()
+            raise
 
+    def _install_signal_handler(self) -> None:
         # Register sigchld signal handler (saving original to restore it later)
         self._original_sigchld_handler = signal.getsignal(signal.SIGCHLD)
         loop = asyncio.get_running_loop()
@@ -97,6 +132,12 @@ class InferencePoolRegistry:
                 self._schedule_worker_stop, signum, frame
             ),
         )
+        self._signal_installed = True
+
+    def _restore_signal_handler(self) -> None:
+        if self._signal_installed:
+            signal.signal(signal.SIGCHLD, self._original_sigchld_handler)
+            self._signal_installed = False
 
     def _schedule_worker_stop(self, signum, frame) -> None:
         task = create_task_independent(self._handle_worker_stop(signum, frame))
@@ -121,14 +162,20 @@ class InferencePoolRegistry:
                 try:
                     # Notify all pools since we don't know which pool owns
                     # this PID — each pool checks internally
-                    if self._default_pool is not None:
-                        await self._default_pool.on_worker_stop(pid, exit_code)
-                    await asyncio.gather(
-                        *[
-                            pool.on_worker_stop(pid, exit_code)
-                            for pool in self._pools.values()
-                        ]
+                    owners = set(self._pools.values()) | set(
+                        self._failed_pools.values()
                     )
+                    if self._default_pool is not None:
+                        owners.add(self._default_pool)
+                    results = await asyncio.gather(
+                        *[pool.on_worker_stop(pid, exit_code) for pool in owners],
+                        return_exceptions=True,
+                    )
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            logger.error(
+                                "Pool worker-stop cleanup failed", exc_info=result
+                            )
                 except Exception:
                     logger.error(
                         f"Failed to handle stop for worker with PID {pid}",
@@ -243,6 +290,9 @@ class InferencePoolRegistry:
             on_worker_load=self._on_worker_load,
             on_worker_unload=self._on_worker_unload,
         )
+        # Transfer extraction ownership only once the pool is retained. Close
+        # may have begun while extraction was awaited, before a pool existed.
+        self._environment_tasks.pop(env_hash, None)
 
         return self._pools[env_hash]
 
@@ -267,9 +317,7 @@ class InferencePoolRegistry:
             )
             self._environment_tasks[env_hash] = task
             task.add_done_callback(self._environment_done)
-        env = await asyncio.shield(task)
-        self._environment_tasks.pop(env_hash, None)
-        return env
+        return await asyncio.shield(task)
 
     async def _prepare_environment(
         self,
@@ -404,17 +452,20 @@ class InferencePoolRegistry:
             # Skip load if model has disabled parallel workers
             return model
 
-        pool = await self._get_or_create(model)
-        # Set env_hash before dispatch so cleanup can find the correct pool
-        # even if pool.load_model fails
-        _set_environment_hash(model, pool.env_hash)
-
+        pool = None
         try:
+            await self.start()
+            pool = await self._get_or_create(model)
+            # The pool is retained under its key before any native activation.
+            _set_environment_hash(model, pool.env_hash)
+            await pool.start()
             loaded = await pool.load_model(model)
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as primary:
             try:
-                await self._close_pool_if_empty(pool)
-            except (Exception, asyncio.CancelledError):
+                if pool is not None:
+                    await self._close_pool_if_empty(pool)
+            except (Exception, asyncio.CancelledError) as cleanup:
+                setattr(primary, "cleanup_error", cleanup)
                 logger.error("Failed to close pool after load failure", exc_info=True)
             raise
 
@@ -477,7 +528,7 @@ class InferencePoolRegistry:
             )
 
     async def _close(self):
-        for lock in list(self._operation_locks.values()):
+        for lock in [self._startup_lock, *list(self._operation_locks.values())]:
             try:
                 await asyncio.wait_for(
                     lock.acquire(), self._settings.model_operation_timeout
@@ -487,7 +538,7 @@ class InferencePoolRegistry:
             else:
                 lock.release()
         # Reset signal handler
-        signal.signal(signal.SIGCHLD, self._original_sigchld_handler)
+        self._restore_signal_handler()
         # Best effort cleanup - closure attempted for all pools and
         # pools always removed from registry
         results = await asyncio.gather(
@@ -527,8 +578,14 @@ class InferencePoolRegistry:
                         "Environment extraction has not settled; ownership retained"
                     )
                 )
-            elif not failures:
-                self._environment_tasks.clear()
+            for key, task in list(self._environment_tasks.items()):
+                if task.done() and not task.cancelled() and task.exception() is None:
+                    try:
+                        task.result().close()
+                    except Exception as error:
+                        failures.append(error)
+                    else:
+                        self._environment_tasks.pop(key, None)
         if failures:
             raise failures[0]
 

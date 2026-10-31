@@ -40,6 +40,7 @@ async def test_exit_before_registration_remains_owned(
 ):
     pools = InferencePoolRegistry(settings) if observation != "known-close" else None
     pool = pools._default_pool if pools is not None else InferencePool(settings)
+    await (pools or pool).start()
     originals = list(pool._workers.values())
     from mlserver.parallel import pool as pool_module
 
@@ -135,6 +136,7 @@ async def test_ordinary_early_exit_restores_committed_model(
     settings, sum_model_settings, monkeypatch, inference_request
 ):
     pools = InferencePoolRegistry(settings)
+    await pools.start()
     pool = pools._default_pool
     registry = MultiModelRegistry(
         on_model_load=[pools.load_model],
@@ -189,6 +191,7 @@ async def test_simultaneous_loss_during_staging_keeps_restart_owners(
     settings.parallel_workers = 2
     settings.model_operation_timeout = 15
     pool = InferencePool(settings)
+    await pool.start()
     originals = list(pool._workers.values())
     entered, release = asyncio.Event(), asyncio.Event()
     monkeypatch.setattr("mlserver.parallel.pool.random.uniform", lambda *_: 0)

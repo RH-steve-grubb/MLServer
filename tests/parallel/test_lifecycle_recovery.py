@@ -70,6 +70,7 @@ async def test_multiprocess_partial_load_recovery(
     # both worker hooks have entered and one worker has acknowledged its load.
     settings.model_operation_timeout = 10
     pool = InferencePool(settings, on_worker_load=[controlled_worker_load])
+    await pool.start()
     original_workers = list(pool._workers.values())
     registry = MultiModelRegistry(
         on_model_load=[pool.load_model],
@@ -256,6 +257,7 @@ async def test_failed_load_preserves_every_committed_worker(
 ):
     settings.model_operation_timeout = 10
     pool = InferencePool(settings)
+    await pool.start()
     registry = MultiModelRegistry(
         on_model_load=[pool.load_model],
         on_model_unload=[pool.unload_model],
@@ -292,6 +294,7 @@ async def test_unversioned_partial_load_preserves_versioned_workers(
 ):
     settings.model_operation_timeout = 10
     pool = InferencePool(settings, on_worker_load=[controlled_worker_load])
+    await pool.start()
     registry = MultiModelRegistry(
         on_model_load=[pool.load_model],
         on_model_unload=[pool.unload_model],

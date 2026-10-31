@@ -86,6 +86,7 @@ async def test_repeated_registry_close_reports_same_cleanup_failure(
 
     settings.parallel_workers = 0
     registry = InferencePoolRegistry(settings)
+    await registry.start()
     pool = registry._default_pool
     failure = RuntimeError("cleanup failed after process exit")
     original = pool._close_workers

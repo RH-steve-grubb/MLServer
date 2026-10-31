@@ -16,6 +16,7 @@ async def exercise_staged_owner(settings, first, outcome, inference_request):
     settings.parallel_workers = 1
     settings.model_operation_timeout = 10
     pools = InferencePoolRegistry(settings)
+    await pools.start()
     entered, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
     first = first.model_copy(deep=True)
     first.name = "committed-owner"
@@ -115,6 +116,7 @@ async def test_failed_fresh_pool_load_can_retire_its_recovery_owner(settings):
     settings.parallel_workers = 1
     settings.model_operation_timeout = 10
     pools = InferencePoolRegistry(settings)
+    await pools.start()
     model = ErrorModel(
         ModelSettings(
             name="failed-only-owner",
@@ -126,6 +128,7 @@ async def test_failed_fresh_pool_load_can_retire_its_recovery_owner(settings):
     )
     try:
         pool = await pools._get_or_create(model)
+        await pool.start()
         workers = list(pool._workers.values())
         with pytest.raises(Exception):
             await pools.load_model(model)

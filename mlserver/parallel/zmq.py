@@ -52,7 +52,8 @@ def _socket(context: zmq.asyncio.Context, kind: int) -> Any:
 
 class ParentTransport:
     def __init__(self, reply_endpoint: str) -> None:
-        self._context = zmq.asyncio.Context(io_threads=1)
+        self._reply_endpoint = reply_endpoint
+        self._context: zmq.asyncio.Context | None = None
         self._replies: Any = None
         self._requests: dict[int, Any] = {}
         self._pending_sends: dict[int, set[asyncio.Future[None]]] = {}
@@ -60,14 +61,7 @@ class ParentTransport:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._failure: BaseException | None = None
         self._closed = False
-        try:
-            self._replies = _socket(self._context, zmq.PULL)
-            self._replies.bind(reply_endpoint)
-        except BaseException:
-            if self._replies is not None:
-                self._replies.close()
-            self._context.term()
-            raise
+        self._close_task: asyncio.Task | None = None
 
     def start(
         self,
@@ -80,6 +74,11 @@ class ParentTransport:
         if self._receiver is not None:
             return
         self._loop = asyncio.get_running_loop()
+        # The dispatcher retains this owner before any native acquisition.
+        # A partially successful start is retired by its normal close path.
+        self._context = zmq.asyncio.Context(io_threads=1)
+        self._replies = _socket(self._context, zmq.PULL)
+        self._replies.bind(self._reply_endpoint)
         self._receiver = asyncio.create_task(self._receive(resolve, failed))
 
     async def _receive(
@@ -141,6 +140,7 @@ class ParentTransport:
         if pid is None:
             raise ValueError("ZeroMQ inference requires a started worker")
         if pid not in self._requests:
+            assert self._context is not None
             sock = _socket(self._context, zmq.PUSH)
             try:
                 sock.connect(getattr(worker, "_zmq_request_endpoint"))
@@ -203,16 +203,39 @@ class ParentTransport:
 
     async def close(self) -> None:
         """Cancel reception and discard unsent IPC messages during shutdown."""
-        if self._closed:
-            return
-        self._closed = True
+        if self._close_task is None:
+            self._closed = True
+            self._close_task = asyncio.create_task(self._close())
+            self._close_task.add_done_callback(self._close_done)
+        await asyncio.shield(self._close_task)
+
+    def _close_done(self, task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "ZeroMQ cleanup failed; owner retained", exc_info=task.exception()
+            )
+
+    async def _close(self) -> None:
         if self._receiver is not None:
             self._receiver.cancel()
-        self._close_requests()
-        self._replies.close()
+        failures: list[BaseException] = []
+        try:
+            self._close_requests()
+        except (Exception, asyncio.CancelledError) as error:
+            failures.append(error)
+        try:
+            if self._replies is not None:
+                self._replies.close()
+        except (Exception, asyncio.CancelledError) as error:
+            failures.append(error)
         if self._receiver is not None:
             await asyncio.gather(self._receiver, return_exceptions=True)
-        self._context.term()
+        if failures:
+            # term() can block with an unclosed socket. Retain that context
+            # and its failure rather than blocking the loop or claiming release.
+            raise failures[0]
+        if self._context is not None:
+            self._context.term()
 
 
 async def _reply(worker: Worker, request: ModelRequestMessage, replies: Any) -> None:

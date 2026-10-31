@@ -51,6 +51,7 @@ async def test_tarball_reuse_survives_old_frontend_collection_and_restart(
     settings.model_operation_timeout = 10
     settings.worker_start_timeout = 5
     pools = InferencePoolRegistry(settings)
+    await pools.start()
     registry = MultiModelRegistry(
         on_model_load=[pools.load_model],
         on_model_unload=[pools.unload_model],
@@ -104,6 +105,7 @@ async def test_failed_pool_close_retains_files_until_successful_release(
     settings.parallel_workers = 1
     settings.model_operation_timeout = 10
     pools = InferencePoolRegistry(settings)
+    await pools.start()
     incoming = sum_model_settings.model_copy(deep=True)
     incoming.parameters.environment_tarball = str(local_environment_tarball)
     try:

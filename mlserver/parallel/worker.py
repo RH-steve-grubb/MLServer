@@ -78,19 +78,31 @@ class Worker(Process):
                 raise ValueError("ZeroMQ worker requires its pool's reply endpoint")
             self._zmq_reply_endpoint = reply
             self._zmq_request_endpoint = create_endpoint(Path(reply[6:]).parent, "q")
-        self._requests: Queue[ModelRequestMessage] = Queue()
-        self._model_updates: Queue[ModelUpdateMessage] = Queue()
+        self._requests: Queue[ModelRequestMessage]
+        self._model_updates: Queue[ModelUpdateMessage]
+        self._queues: list[Queue] = []
         self._queues_retired = False
-        for queue in [self._requests, self._model_updates]:
-            _serialize_connection_close(getattr(queue, "_reader"))
-            # WorkerStop reports delivery failures. After confirmed consumer
-            # exit, retirement deliberately breaks obsolete blocked writes.
-            setattr(queue, "_ignore_epipe", True)
         self._env = env
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
 
         self.__executor: ThreadPoolExecutor | None = None
+
+    def _prepare_queues(self) -> None:
+        # The pool already owns this Worker, even if the second allocation or
+        # Process.start fails. Retain each completed acquisition immediately.
+        if not self._queues:
+            self._queues.append(Queue())
+        if len(self._queues) == 1:
+            self._queues.append(Queue())
+        self._requests, self._model_updates = self._queues
+        for queue in self._queues:
+            _serialize_connection_close(getattr(queue, "_reader"))
+            setattr(queue, "_ignore_epipe", True)
+
+    def start(self) -> None:
+        self._prepare_queues()
+        super().start()
 
     @property
     def _executor(self) -> ThreadPoolExecutor:
@@ -307,8 +319,8 @@ class Worker(Process):
 
     def close_queues(self):
         """Close this worker's parent-side queues."""
-        self._model_updates.close()
-        self._requests.close()
+        for queue in self._queues:
+            queue.close()
 
     @property
     def queues_retired(self) -> bool:
@@ -319,11 +331,11 @@ class Worker(Process):
         """Release parent-side writers only after the consumer has exited."""
         if self._queues_retired:
             return
-        if self.exitcode is None:
+        if self.pid is not None and self.exitcode is None:
             raise RuntimeError("Cannot retire queues before confirmed worker exit")
         self.close_queues()
         failures = []
-        for queue in [self._requests, self._model_updates]:
+        for queue in self._queues:
             try:
                 # Queue.close() alone only queues a sentinel behind buffered
                 # data. A dead consumer cannot drain a full pipe. Closing its

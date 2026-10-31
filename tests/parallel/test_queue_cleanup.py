@@ -24,6 +24,7 @@ async def test_failed_retirement_remains_retryable(monkeypatch):
         exitcode=0,
         pid=0,
         _queues_retired=False,
+        _queues=queues,
         _requests=queues[0],
         _model_updates=queues[1],
         close_queues=lambda: [queue.close() for queue in queues],
@@ -89,6 +90,7 @@ async def test_retirement_does_not_race_feeder_connection_close(
     monkeypatch.setattr(worker_module, "Lock", ObservedLock, raising=False)
     settings.parallel_workers = 1
     pool = InferencePool(settings)
+    await pool.start()
     worker = next(iter(pool._workers.values()))
     queue = worker._model_updates
     reader = queue._reader
@@ -148,6 +150,7 @@ async def test_close_settles_writers_after_blocked_worker_exit(
     entered = tmp_path / "entered"
     sum_model_settings.parameters.extra["entered_file"] = str(entered)
     pool = InferencePool(settings, on_worker_load=[block_worker])
+    await pool.start()
     worker = next(iter(pool._workers.values()))
     attempt = asyncio.create_task(pool.load_model(SumModel(sum_model_settings)))
 

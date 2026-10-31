@@ -184,11 +184,6 @@ class Dispatcher:
         self._executor = ThreadPoolExecutor()
         self._async_responses = AsyncResponses()
         self._transport: ParentTransport | None = None
-        reply = getattr(responses, "_zmq_reply_endpoint", None)
-        if reply is not None:
-            from .zmq import ParentTransport
-
-            self._transport = ParentTransport(reply)
 
     def _reset_round_robin(self) -> Iterator[int]:
         worker_pids = list(self._ready_workers.keys())
@@ -239,6 +234,11 @@ class Dispatcher:
 
     def start(self):
         self._active = True
+        reply = getattr(self._responses, "_zmq_reply_endpoint", None)
+        if reply is not None and self._transport is None:
+            from .zmq import ParentTransport
+
+            self._transport = ParentTransport(reply)
         if self._transport is not None:
             self._transport.start(
                 self._async_responses.resolve, self._async_responses.fail_all
@@ -361,17 +361,29 @@ class Dispatcher:
         # A worker killed while writing can leave a broken response queue.
         # Never block the event loop indefinitely in executor.shutdown().
         self._executor.shutdown(wait=False)
+        failures: list[BaseException] = []
         if self._transport is not None:
-            await self._transport.close()
+            try:
+                await self._transport.close()
+            except (Exception, asyncio.CancelledError) as error:
+                failures.append(error)
         if self._process_responses_task is not None:
             # Cancelling an executor Future does not stop its Queue.get().
             # Wake the reader before joining it, while the queue is still open.
             if not self._process_responses_task.done():
                 self._responses.put(END_OF_QUEUE)
-            await cancel_task(self._process_responses_task)
+            try:
+                await cancel_task(self._process_responses_task)
+            except (Exception, asyncio.CancelledError) as error:
+                failures.append(error)
         for thread in self._executor._threads:
             await asyncio.to_thread(thread.join, timeout)
             if thread.is_alive():
-                raise RuntimeError(
-                    "Response reader did not exit; dispatcher resources remain owned"
+                failures.append(
+                    RuntimeError(
+                        "Response reader did not exit; "
+                        "dispatcher resources remain owned"
+                    )
                 )
+        if failures:
+            raise failures[0]

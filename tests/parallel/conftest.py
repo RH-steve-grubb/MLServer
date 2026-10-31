@@ -11,7 +11,7 @@ from mlserver.model import MLModel
 from mlserver.env import Environment
 from mlserver.parallel.dispatcher import Dispatcher
 from mlserver.parallel.model import ModelMethods
-from mlserver.parallel.pool import InferencePool, _spawn_worker
+from mlserver.parallel.pool import InferencePool
 from mlserver.parallel.worker import Worker
 from mlserver.parallel.utils import configure_inference_pool, cancel_task
 from mlserver.parallel.messages import (
@@ -26,6 +26,7 @@ from ..fixtures import ErrorModel, EnvModel
 @pytest.fixture
 async def inference_pool(settings: Settings) -> AsyncGenerator[InferencePool, None]:
     pool = InferencePool(settings)
+    await pool.start()
     yield pool
 
     await pool.close()
@@ -90,6 +91,7 @@ async def worker(
     load_message: ModelUpdateMessage,
 ) -> AsyncGenerator[Worker, None]:
     worker = Worker(settings, responses)
+    worker._prepare_queues()
 
     # Simulate the worker running on a different process, but keep it to a
     # thread to simplify debugging.
@@ -199,7 +201,9 @@ async def worker_with_env(
 ):
     # NOTE: This fixture will start an actual worker running on a separate
     # process.
-    worker = _spawn_worker(settings, responses, env, [], [])
+    worker = Worker(settings, responses, env, [], [])
+    with env:
+        worker.start()
 
     load_message = ModelUpdateMessage(
         update_type=ModelUpdateType.Load, model_settings=env_model_settings

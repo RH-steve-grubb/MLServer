@@ -400,6 +400,9 @@ async def test_load_model_serializes_models_sharing_pool(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             nonlocal active, maximum_active
             active += 1
@@ -462,6 +465,9 @@ async def test_load_model_allows_different_pools_concurrently(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             nonlocal active, entered, maximum_active
             entered += 1
@@ -520,6 +526,9 @@ async def test_load_model_serializes_unload_for_same_pool(
 
     class FakePool:
         env_hash = None
+
+        async def start(self):
+            pass
 
         async def load_model(self, model: MLModel) -> MLModel:
             load_started.set()
@@ -589,6 +598,9 @@ async def test_load_model_allows_unload_for_different_pools(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             load_started.set()
             await release_load.wait()
@@ -647,6 +659,9 @@ async def test_load_model_cancellation_settles_and_preserves_pool_state(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             load_started.set()
             await release_load.wait()
@@ -685,6 +700,9 @@ async def test_unload_model_cancellation_settles_and_clears_pool_state(
 
     class FakePool:
         env_hash = None
+
+        async def start(self):
+            pass
 
         async def unload_model(self, model: MLModel) -> MLModel:
             unload_started.set()
@@ -730,6 +748,7 @@ async def test_load_model_with_hooks(
     """
     # Create registry with a hook that raises
     registry = InferencePoolRegistry(settings, on_worker_load=[_test_load_hook_raises])
+    await registry.start()
 
     try:
         sum_model = SumModel(sum_model_settings)
