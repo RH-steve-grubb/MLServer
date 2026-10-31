@@ -1,4 +1,170 @@
-# Lifecycle ownership
+# Model lifecycle: theory of operation
+
+This document describes model management within one MLServer process and its
+workers. It is the reference for lifecycle changes and for future instrumentation.
+The state names below describe the implementation; they are not new public API
+values. Committed state is held in memory, not a durable transaction log.
+
+## Owners and identities
+
+| Component | Responsibility |
+| --- | --- |
+| `MultiModelRegistry` | Resolves a public model name to its `SingleModelRegistry`. |
+| `SingleModelRegistry` | Serializes changes for that name; owns frontend instances, version/default selection, pending replacements, preparation and cleanup. |
+| `InferencePoolRegistry` | Resolves the default, named or environment pool; serializes mutations sharing that pool key; retains initialization, extraction and failed-close owners. |
+| `InferencePool` | Owns processes and their parent resources; tracks committed replay settings, staged preparation, uncertain updates and recovery. |
+| `Dispatcher` and parent transport | Select routable workers, own response waiters and socket operations, and revoke stopped worker instances. |
+| Worker `MultiModelRegistry` | Holds the actual runtime instances for that process and acknowledges model updates. |
+
+A public `(name, version)` identifies a lookup, not a unique lifetime. Replacement
+instances can have exactly the same name/version. A worker PID likewise identifies
+an OS process number, not an incarnation forever. Resource cleanup follows the
+actual instance. Worker update messages have distinct UUIDs, so an old response
+cannot complete a newer update. These are internal lifecycle identities; W0 does
+not introduce request-generation leases.
+
+## State has several independent dimensions
+
+| Dimension | Meaning |
+| --- | --- |
+| Registered | A frontend lookup can find the instance. A fresh loading entry can be registered before it is ready. |
+| Prepared | Runtime loading and load hooks have succeeded for the candidate. A replacement can be prepared without being committed. |
+| Committed | This instance/configuration is the selected generation. Replacement publication occurs before releasing the displaced instance. |
+| Ready | The model's readiness flag is set. Public server readiness also follows existing startup and empty-registry settings. |
+| Routable worker | The dispatcher may select this worker. Quarantine removes eligibility even when committed frontend settings remain intact. |
+| Retired | The instance has lost serving eligibility; it may still own resources or unfinished cleanup. |
+| Released | Cleanup has completed, or native process exit and parent-resource retirement have been confirmed. Removing a dictionary entry is insufficient evidence. |
+
+For example, a published replacement can be ready while its pool is quarantined
+after an unacknowledged cleanup update. An abandoned candidate can be absent from
+lookups while its native preparation remains owned. Observability must preserve
+these distinctions.
+
+The frontend flow is:
+
+```mermaid
+stateDiagram-v2
+    [*] --> WaitingForLock
+    WaitingForLock --> Preparing: mutation accepted
+    WaitingForLock --> [*]: caller cancels before acceptance
+    Preparing --> Committed: load succeeds / replacement publishes
+    Preparing --> Retired: failure or deadline before commit
+    Committed --> Retired: explicit unload or displacement
+    Retired --> Released: cleanup confirmed
+    Retired --> CleanupFailed: cleanup fails
+    CleanupFailed --> Retired: supported cleanup retry
+    Released --> [*]
+```
+
+This diagram omits the parallel pool's separate recovery state. A model mutation
+can leave the caller while a retained owner continues preparing, reconciling or
+cleaning. A failed pool close has a recorded terminal result, rather than the
+local model cleanup retry shown above.
+
+## Load, replacement and unload
+
+A load waits for the name's lifecycle lock. Pool-backed hooks additionally resolve
+the pool key and serialize mutations sharing that pool. Cancellation before lock
+acceptance changes no model. After acceptance the existing deferred-cancellation
+policy returns the operation's result/error despite caller cancellation, subject
+to its configured cooperative deadline.
+
+For a fresh load, the frontend can register a not-ready loading entry, runs hooks
+in order, and awaits the exact runtime preparation task. A hook can transfer
+ownership to a wrapper. Pool preparation requires acknowledgements from workers;
+its frontend hook remains staged until subsequent hooks/preparation succeed.
+Successful preparation marks the model ready and makes committed settings
+eligible for later replay.
+
+For a replacement, the previous instance remains selected while the candidate
+prepares. At publication the new ready instance becomes selected before old-model
+cleanup. Worker preparation and worker publication are distinct: prepared worker
+replacements remain staged until the frontend sends the old-generation unload.
+Precommit failure discards only the candidate and preserves the previous committed
+identity/settings. Postcommit cleanup failure preserves the new committed state;
+it can still make the operation report an error and can quarantine the pool.
+An operation error alone therefore does not establish which generation is active.
+
+Explicit unload removes serving eligibility and gives the selected exact instance
+a retained cleanup owner before awaiting resource release. Public versionless
+lookup/unload retains its existing default-version selection. Worker messages
+target an exact version, including an unversioned instance; absence cannot select
+and delete a healthy sibling version.
+
+## Worker updates, recovery and retirement
+
+Pool replay inventory records desired committed configuration, not every load
+ever dispatched. A frontend deadline cannot retract an update already delivered
+to a worker. The pool retains its waiter, quarantines the affected pool, and
+settles the update before acknowledged rollback/cleanup restores routing.
+Independent pools remain available. Other models sharing an uncertain pool lose
+routing availability while their committed settings are retained.
+
+A worker restart waits for staged publication and recovery before replay. It owns
+the worker before native acquisition, replays the committed state, and publishes
+readiness only after successful initialization. Abandoned candidates cannot enter
+replay merely because a worker restarts. A stopped worker is revoked from routing
+and transport sends, including sends queued from a foreign event loop. Confirmed
+process exit and successful parent queue/feeder retirement are separate events.
+
+Shutdown requests closure before waiting for lifecycle locks. Each manager retains
+one close operation; repeated callers join it and observe its result/error.
+Cancellation of a close waiter does not cancel cleanup. Existing deadlines and
+bounded stop/kill/join mechanisms bound escalation; unfinished resources and errors
+remain owned. Endpoint directories and owned environments outlive the resources
+using them. Borrowed environments are never deleted.
+
+## Basis for future observability
+
+Instrumentation should record transitions and their owners, rather than infer
+release or rollback from a caller's outcome. The following are semantic event/span
+boundaries for future work; W0 does not implement these proposed signals.
+
+| Boundary | Observation that matters |
+| --- | --- |
+| Requested / accepted | Separate time waiting for name/pool locks from time spent performing an accepted mutation. |
+| Preparation started / settled | Record the actual instance and outcome, including settlement after caller deadline. |
+| Replacement published | Identify the selected replacement and displaced instance independently of cleanup outcome. |
+| Caller deadline / cancellation | Distinguish pre-acceptance cancellation, deferred cancellation and deadline expiry; none proves native interruption. |
+| Worker update delivered / acknowledged | Correlate each message UUID and worker incarnation; retain late settlement as a separate observation. |
+| Quarantine entered / recovery finished | Measure affected pool/model availability and the duration of uncertainty; failed recovery must not emit a routing-restored event. |
+| Cleanup started / failed / confirmed | Separate retirement from actual resource release and preserve primary and secondary errors. |
+| Worker exit / queues retired | Record confirmed status and separate parent-resource completion. A termination request is not an exit observation. |
+| Close requested / completed / failed | Report the retained close result; a cancelled waiter is not a successful manager close. |
+
+Logs/traces can correlate public model identity, an instance/operation correlation
+identifier, pool key, worker incarnation/PID, message UUID and transport. Correlation
+identifiers must describe actual implementation identities, not imply that W3
+request ownership already exists. Avoid unbounded IDs as metric labels. Phase,
+outcome and transport can support bounded counters/histograms; per-model or pool
+labels need an explicit cardinality policy. Gauges for registered/loading models,
+routable workers, quarantined pools and retained cleanup owners represent different
+quantities and must not be combined into a single "loaded" count.
+
+Measure preparation, publication-to-cleanup completion, reconciliation and close
+separately. A request-duration metric ending at timeout cannot measure the lifetime
+of native work that continues afterward. A successful replacement followed by old
+cleanup failure is a committed replacement plus a cleanup failure, rather than a
+failed publication.
+
+## Limits and verification
+
+Cooperative asyncio deadlines cannot interrupt a blocked event loop or establish
+that native/thread/process work has stopped. Unsettled local native preparation
+can retain a model name indefinitely; unconfirmed native or reader cleanup remains
+an observable terminal failure. Arbitrary detached extension work is unsupported
+unless its author supplies independent ownership and timeout boundaries.
+
+W0 protects model publication, rollback identity, replay eligibility, quarantine,
+worker/send ownership and repeatable cleanup outcomes at tested boundaries. It
+does not guarantee safe retirement of every previously accepted inference holding
+an old instance, nor provide general accepted/queued/in-flight generation leases.
+That broader request ownership remains W3 work. Placement, caching, admission and
+inference offloading must not infer those guarantees from W0.
+
+The detailed ownership and failure contracts below qualify these flows.
+
+## Detailed ownership contract
 
 Lifecycle operations remain serialized by model name and by inference pool.
 Acquiring the public operation lock accepts a mutation; cancellation while waiting
