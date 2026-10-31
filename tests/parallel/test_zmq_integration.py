@@ -235,3 +235,47 @@ async def test_worker_error_keeps_other_model_and_control_channel_available(
     assert not case.pool.has_model(failing_source.settings)
     assert case.pool.has_model(case.model.settings)
     assert not case.pool._dispatcher._async_responses._futures
+
+
+async def test_failed_close_retains_directory_for_live_workers(
+    settings: Settings, sum_model: MLModel, mocker: MockerFixture
+) -> None:
+    settings.parallel_workers = 1
+    pool = InferencePool(settings)
+    assert pool._transport_directory is not None
+    directory = Path(pool._transport_directory.name)
+    workers = list(pool._workers.values())
+    close_workers = pool._close_workers
+    failure = RuntimeError("worker cleanup has not completed")
+
+    async def fail_before_cleanup() -> None:
+        raise failure
+
+    patched = None
+    try:
+        await asyncio.wait_for(pool.load_model(sum_model), 10)
+        patched = mocker.patch.object(pool, "_close_workers", fail_before_cleanup)
+        for _ in range(2):
+            with pytest.raises(RuntimeError) as observed:
+                await asyncio.wait_for(pool.close(), 10)
+            assert observed.value is failure
+            # W0 must preserve the performance transport's native ownership:
+            # an error does not authorize deleting live children's endpoints.
+            assert all(worker.is_alive() for worker in workers)
+            assert directory.is_dir()
+            assert not pool._dispatcher._ready_workers
+    finally:
+        if patched is not None:
+            mocker.stop(patched)
+        # Failed close intentionally records its result. Release this test's
+        # retained native owners explicitly, then remove their private directory.
+        try:
+            await close_workers()
+        finally:
+            for worker in workers:
+                if worker.is_alive():
+                    worker.kill()
+                await asyncio.to_thread(worker.join, 5)
+                assert not worker.is_alive()
+                await worker.retire_queues(5)
+            pool._transport_directory.cleanup()
