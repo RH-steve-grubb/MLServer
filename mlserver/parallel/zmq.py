@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any
 import uuid
+from weakref import WeakKeyDictionary
 
 import zmq
 import zmq.asyncio
@@ -55,8 +56,11 @@ class ParentTransport:
         self._reply_endpoint = reply_endpoint
         self._context: zmq.asyncio.Context | None = None
         self._replies: Any = None
-        self._requests: dict[int, Any] = {}
-        self._pending_sends: dict[int, set[asyncio.Future[None]]] = {}
+        self._requests: dict[Worker, Any] = {}
+        self._pending_sends: dict[Worker, set[asyncio.Future[None]]] = {}
+        # Queued cross-loop coroutines retain their selected Worker. Keep only
+        # its small exit status here, never an exception/traceback retaining it.
+        self._stopped_workers: WeakKeyDictionary[Worker, int] = WeakKeyDictionary()
         self._receiver: asyncio.Task | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._failure: BaseException | None = None
@@ -127,6 +131,11 @@ class ParentTransport:
             raise
 
     async def _send(self, worker: Worker, message: ModelRequestMessage) -> None:
+        # This first step runs on the socket owner. A stop can precede it even
+        # when submission and response registration already happened elsewhere.
+        exit_code = self._stopped_workers.get(worker)
+        if exit_code is not None:
+            raise WorkerStop(exit_code)
         if (
             self._closed
             or self._failure is not None
@@ -139,7 +148,7 @@ class ParentTransport:
         pid = worker.pid
         if pid is None:
             raise ValueError("ZeroMQ inference requires a started worker")
-        if pid not in self._requests:
+        if worker not in self._requests:
             assert self._context is not None
             sock = _socket(self._context, zmq.PUSH)
             try:
@@ -147,10 +156,10 @@ class ParentTransport:
             except BaseException:
                 sock.close()
                 raise
-            self._requests[pid] = sock
+            self._requests[worker] = sock
         # Use multiprocessing.Queue's exact default serializer/protocol,
         # including the existing Pydantic and NumPy pickle reducers.
-        sending = self._requests[pid].send(ForkingPickler.dumps(message), copy=True)
+        sending = self._requests[worker].send(ForkingPickler.dumps(message), copy=True)
         if sending.done():
             sending.result()
             return
@@ -158,7 +167,7 @@ class ParentTransport:
         # worker/transport failure cannot masquerade as caller cancellation.
         # Ready sends keep the original direct path without an extra Future.
         completed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        pending = self._pending_sends.setdefault(pid, set())
+        pending = self._pending_sends.setdefault(worker, set())
         pending.add(completed)
         sending.add_done_callback(partial(self._complete_send, completed))
         try:
@@ -166,7 +175,7 @@ class ParentTransport:
         finally:
             pending.discard(completed)
             if not pending:
-                self._pending_sends.pop(pid, None)
+                self._pending_sends.pop(worker, None)
             if not sending.done():
                 sending.cancel()
             # Explicit task cancellation may win after worker failure has set
@@ -187,12 +196,17 @@ class ParentTransport:
         else:
             completed.set_result(None)
 
-    def forget_worker(self, pid: int, exit_code: int = -1) -> None:
-        """Release the request socket when its worker leaves the pool."""
-        for completed in self._pending_sends.get(pid, ()):
+    def forget_worker(self, worker: Worker, exit_code: int = -1) -> None:
+        """Revoke this incarnation on the owner loop, even before its first send."""
+        previous = self._stopped_workers.get(worker)
+        if previous is None or previous == -1:
+            self._stopped_workers[worker] = exit_code
+        else:
+            exit_code = previous
+        for completed in self._pending_sends.get(worker, ()):
             if not completed.done():
                 completed.set_exception(WorkerStop(exit_code))
-        sock = self._requests.pop(pid, None)
+        sock = self._requests.pop(worker, None)
         if sock is not None:
             sock.close()
 

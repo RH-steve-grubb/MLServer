@@ -1,7 +1,7 @@
 import asyncio
 
 from typing import cast, TYPE_CHECKING
-from collections import defaultdict
+from weakref import WeakKeyDictionary
 from collections.abc import Awaitable, Iterator
 from itertools import cycle
 from multiprocessing import Queue
@@ -42,10 +42,12 @@ class AsyncResponses:
 
         # _workers_map keeps track of which in-flight requests are being served
         # by each worker
-        self._workers_map: dict[int, set[str]] = defaultdict(set)
+        # Empty groups stay weakly keyed. Deleting after observing an empty
+        # group can erase a request concurrently registered by a foreign loop.
+        self._workers_map: WeakKeyDictionary[Worker, set[str]] = WeakKeyDictionary()
         # _futures_map keeps track of which worker is serving each in-flight
         # request
-        self._futures_map: dict[str, int] = {}
+        self._futures_map: dict[str, Worker] = {}
 
         self.parallel_request_queue_size = self._get_or_create_metric()
 
@@ -88,8 +90,11 @@ class AsyncResponses:
         return future
 
     def _track_message(self, message: Message, worker: Worker) -> None:
-        self._futures_map[message.id] = worker.pid  # type: ignore
-        self._workers_map[worker.pid].add(message.id)  # type: ignore
+        self._futures_map[message.id] = worker
+        messages = self._workers_map.get(worker)
+        if messages is None:
+            messages = self._workers_map.setdefault(worker, set())
+        messages.add(message.id)
 
     async def _wait(self, message_id: str) -> ModelResponseMessage:
         future = self._futures[message_id]
@@ -102,8 +107,9 @@ class AsyncResponses:
 
     def _clear_message(self, message_id: str) -> None:
         del self._futures[message_id]
-        worker_pid = self._futures_map.pop(message_id)
-        self._workers_map[worker_pid].remove(message_id)
+        worker = self._futures_map.pop(message_id)
+        messages = self._workers_map[worker]
+        messages.remove(message_id)
 
     def resolve(self, response: ModelResponseMessage):
         """
@@ -150,16 +156,19 @@ class AsyncResponses:
         Cancel in-flight requests for worker (e.g. because it died
         unexpectedly).
         """
-        in_flight = self._workers_map[worker.pid]  # type: ignore
+        in_flight = self._workers_map.get(worker, set())
         if in_flight:
             logger.info(
                 f"Cancelling {len(in_flight)} in-flight requests for "
                 f"worker {worker.pid} which died unexpectedly with "
                 f"exit code {exit_code}..."
             )
-        for message_id in in_flight:
+        # Foreign-loop waiters can clear entries as callbacks are delivered.
+        for message_id in list(in_flight):
             err = WorkerStop(exit_code)
-            future = self._futures[message_id]
+            future = self._futures.get(message_id)
+            if future is None:
+                continue
             loop = future.get_loop()
             loop.call_soon_threadsafe(self._fail, future, err)
 
@@ -221,15 +230,15 @@ class Dispatcher:
         in-flight requests assigned to that worker.
         """
         pid = worker.pid
-        if pid in self._workers:
+        if pid is not None and self._workers.get(pid) is worker:
             del self._workers[pid]
 
-        if pid in self._ready_workers:
+        if pid is not None and self._ready_workers.get(pid) is worker:
             del self._ready_workers[pid]
 
         self._reset_round_robin()
         if self._transport is not None and pid is not None:
-            self._transport.forget_worker(pid, exit_code)
+            self._transport.forget_worker(worker, exit_code)
         self._async_responses.cancel(worker, exit_code)
 
     def start(self):

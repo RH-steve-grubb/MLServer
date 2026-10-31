@@ -87,7 +87,23 @@ failure retained and reported by subsequent mutations. Close remains available.
 An already dispatched operation which never settles remains owned and quarantined
 until close confirms process exit. Other models in the same pool lose availability
 during this conservative recovery; their committed configurations are retained.
-Other pools remain independent. This adds no work to successful predictions.
+Other pools remain independent. Update recovery adds no work to successful
+predictions.
+
+The ZeroMQ parent transport revokes a selected worker instance even if its
+forwarded send has not begun on the socket owner loop. The first send step checks
+that instance's retained exit status before touching sockets. Exit zero is also
+terminal; worker failure is reported as `WorkerStop`, while genuine caller
+cancellation remains cancellation. Sockets, pending sends and response ownership
+use the same worker identity, so stale cleanup cannot remove a replacement with
+the same PID. Retired workers with unfinished queue cleanup also remain distinct
+resource owners after PID reuse. Stop-status records are weakly keyed and store
+only integers: queued work keeps its selected worker alive until settlement,
+then collection can release the record. This adds one constant-time weak-key
+status lookup to each ZeroMQ send; response bookkeeping uses weak instance keys in place of PID keys. Empty groups
+remain weakly held so a concurrent schedule cannot lose its group during cleanup. Ready sends still avoid an
+extra per-request future. No process polling, global inference lock or generation
+lease is added.
 
 Automatic pool retirement also counts staged frontend preparation and pending
 replacements. Removing the last committed model cannot close

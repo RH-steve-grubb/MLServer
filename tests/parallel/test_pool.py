@@ -3,7 +3,7 @@ import pytest
 import asyncio
 import numpy as np
 from copy import deepcopy
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 from mlserver.errors import MLServerError
 from mlserver.model import MLModel
@@ -11,6 +11,7 @@ from mlserver.settings import Settings, ModelSettings
 from mlserver.types import InferenceRequest
 from mlserver.codecs import NumpyCodec, StringCodec
 from mlserver.parallel.pool import InferencePool, WorkerRegistry
+from mlserver.parallel.worker import Worker
 from mlserver.parallel.errors import InferencePoolUnavailable
 
 from ..fixtures import ErrorModel, SumModel
@@ -39,7 +40,7 @@ async def _wait_for_workers(pool: InferencePool, expected: int):
 def startup_worker(mocker):
     # These unit tests control replay without spawning a process. Represent a
     # live child accurately: exit status zero means confirmed exit, not liveness.
-    worker = SimpleNamespace(pid=987654, exitcode=None, queues_retired=False)
+    worker = Mock(spec=Worker, pid=987654, exitcode=None, queues_retired=False)
 
     async def stop():
         worker.exitcode = 0

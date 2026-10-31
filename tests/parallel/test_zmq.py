@@ -135,7 +135,7 @@ async def test_wire_uses_queues_default_pickle_and_does_not_modify_worker_state(
         wire = await asyncio.wait_for(peer.recv(), timeout=2)
         assert wire == bytes(ForkingPickler.dumps(message))
         assert target.__dict__ == state
-        sock = parent._requests[42]
+        sock = parent._requests[target]
         assert sock.getsockopt(zmq.SNDHWM) == sock.getsockopt(zmq.RCVHWM) == 0
         assert sock.getsockopt(zmq.IMMEDIATE) == 1
         assert sock.getsockopt(zmq.LINGER) == 0
@@ -281,7 +281,7 @@ async def test_transport_failures_release_send_waiting_for_worker_connection(
         await asyncio.sleep(0.03)
         assert not sending.done()
         if failure == "worker-stop":
-            parent.forget_worker(42)
+            parent.forget_worker(target)
         elif failure == "receiver-failure":
             peer.connect(endpoint)
             await peer.send(ForkingPickler.dumps("invalid response"))
@@ -371,11 +371,11 @@ async def test_worker_replacement_forgets_socket_and_reconnects(
             tasks.append(asyncio.create_task(transport.serve_requests(target)))
             await asyncio.wait_for(parent.send(target, request_message()), timeout=2)
             await asyncio.wait_for(received.get(), timeout=2)
-            sock = parent._requests[42]
+            sock = parent._requests[target]
             assert sock is not previous
-            parent.forget_worker(42)
-            assert sock.closed and 42 not in parent._requests
-            parent.forget_worker(42)
+            parent.forget_worker(target)
+            assert sock.closed and target not in parent._requests
+            parent.forget_worker(target)
             previous = sock
     finally:
         await parent.close()

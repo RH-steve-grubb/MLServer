@@ -138,6 +138,8 @@ class InferencePool:
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False
         self._close_task: asyncio.Task | None = None
+        # Confirmed-exit workers can still own unretired queues while a later
+        # incarnation reuses their PID. Keep both resource owners by identity.
         self._closing_workers: dict[int, Worker] = {}
         self._restart_tasks: set[asyncio.Task] = set()
         self._recovery_task: asyncio.Task | None = None
@@ -240,9 +242,10 @@ class InferencePool:
         # If the inference pool is closing, or the current worker
         # is not in this inference pool, worker stop handling
         # should be skipped
-        if pid in self._closing_workers:
-            self._closing_workers[pid].record_exit(exit_code)
-            return
+        for closing in self._closing_workers.values():
+            if closing.pid == pid and closing.exitcode is None:
+                closing.record_exit(exit_code)
+                return
         if pid not in self._workers:
             # Registration may be waiting for the dispatcher lock. Its startup
             # task still owns this child, including waitpid's confirmed status.
@@ -286,7 +289,7 @@ class InferencePool:
         finally:
             # The child has already been reaped by the SIGCHLD handler. Clean
             # up the parent-side queue resources before discarding the worker.
-            self._closing_workers[pid] = worker
+            self._closing_workers[id(worker)] = worker
             try:
                 await worker.retire_queues(self._settings.parallel_workers_timeout)
             except Exception:
@@ -295,7 +298,7 @@ class InferencePool:
                     exc_info=True,
                 )
             else:
-                self._closing_workers.pop(pid, None)
+                self._closing_workers.pop(id(worker), None)
 
             # Restart independently of the signal handler and its inherited
             # timeout context. Keep each owner until its result is observed.
@@ -384,7 +387,7 @@ class InferencePool:
             assert worker.pid is not None
             self._dispatcher.on_worker_stop(worker, -1)
             if not worker.queues_retired:
-                self._closing_workers[worker.pid] = worker
+                self._closing_workers[id(worker)] = worker
             if self._closing or worker.queues_retired:
                 # Completed retirement needs no new owner. Otherwise close
                 # joins startup before its final sweep; do not race that owner.
@@ -401,7 +404,7 @@ class InferencePool:
                 except Exception:
                     logger.error("Replay worker queue cleanup failed", exc_info=True)
                 else:
-                    self._closing_workers.pop(worker.pid, None)
+                    self._closing_workers.pop(id(worker), None)
             raise
         finally:
             # A deadline while waiting for dispatcher registration may leave
@@ -417,7 +420,7 @@ class InferencePool:
         else:
             assert worker.pid is not None
             if not worker.queues_retired:
-                self._closing_workers[worker.pid] = worker
+                self._closing_workers[id(worker)] = worker
             self._dispatcher.on_worker_stop(worker, -1)
             return None
         return worker
@@ -653,7 +656,7 @@ class InferencePool:
             raise failed
         if not self._closing and asyncio.current_task() is self._recovery_task:
             for pid, worker in self._quarantined_workers.items():
-                if pid in self._workers:
+                if self._workers.get(pid) is worker:
                     self._dispatcher.on_worker_ready(worker)
             self._quarantined_workers.clear()
 
@@ -821,7 +824,7 @@ class InferencePool:
         cleanup_errors: list[BaseException] = []
         for worker in list(self._unstarted_workers):
             if worker.pid is not None:
-                self._closing_workers[worker.pid] = worker
+                self._closing_workers[id(worker)] = worker
                 self._unstarted_workers.discard(worker)
                 continue
             try:
@@ -829,13 +832,21 @@ class InferencePool:
                 self._unstarted_workers.discard(worker)
             except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
-        self._closing_workers.update(self._starting_workers)
-        self._closing_workers.update(self._workers)
-        for pid, worker in list(self._closing_workers.items()):
+        self._closing_workers.update(
+            (id(w), w) for w in self._starting_workers.values()
+        )
+        self._closing_workers.update((id(w), w) for w in self._workers.values())
+        for worker in list(self._closing_workers.values()):
+            pid = worker.pid
             # Quarantine first, retaining the owner until process exit and
             # parent queue retirement are confirmed. A kill is only a request.
-            if self._owned_dispatcher is not None:
-                self._dispatcher.on_worker_stop(worker, -1)
+            try:
+                if self._owned_dispatcher is not None:
+                    self._dispatcher.on_worker_stop(worker, -1)
+            except (Exception, asyncio.CancelledError) as error:
+                # Revocation/socket cleanup failure must not skip confirming
+                # this child's exit or attempting independent worker cleanup.
+                cleanup_errors.append(error)
             try:
                 if worker.exitcode is None:
                     await asyncio.wait_for(
@@ -855,7 +866,7 @@ class InferencePool:
                 if worker.exitcode is None:
                     raise RuntimeError(f"Worker {pid} has not confirmed exit")
                 await worker.retire_queues(self._settings.parallel_workers_timeout)
-                self._closing_workers.pop(pid, None)
+                self._closing_workers.pop(id(worker), None)
             except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
                 continue
