@@ -35,6 +35,26 @@ async def _wait_for_workers(pool: InferencePool, expected: int):
         await asyncio.sleep(0.1)
 
 
+@pytest.fixture
+def startup_worker(mocker):
+    # These unit tests control replay without spawning a process. Represent a
+    # live child accurately: exit status zero means confirmed exit, not liveness.
+    worker = SimpleNamespace(pid=987654, exitcode=None, queues_retired=False)
+
+    async def stop():
+        worker.exitcode = 0
+
+    async def retire(_timeout):
+        worker.queues_retired = True
+
+    worker.stop = stop
+    worker.join = lambda _timeout: None
+    worker.kill = mocker.Mock(side_effect=lambda: worker.record_exit(-9))
+    worker.record_exit = lambda code: setattr(worker, "exitcode", code)
+    worker.retire_queues = retire
+    return worker
+
+
 def test_workers_start(inference_pool: InferencePool, settings: Settings):
     assert len(inference_pool._workers) == settings.parallel_workers
     assert (
@@ -287,21 +307,12 @@ async def test_load_error(
 
 
 async def test_start_worker_waits_for_load_lock(
-    inference_pool: InferencePool, sum_model: MLModel, mocker
+    inference_pool: InferencePool, sum_model: MLModel, mocker, startup_worker
 ):
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
     startup_started = asyncio.Event()
-    worker = SimpleNamespace(pid=987654)
-
-    async def stop_worker():
-        return None
-
-    worker.stop = stop_worker
-    worker.join = lambda _timeout: None
-    worker.exitcode = 0
-    worker.close_queues = lambda: None
-    worker.retire_queues = lambda _timeout: stop_worker()
+    worker = startup_worker
 
     async def controlled_dispatch(_message):
         dispatch_started.set()
@@ -450,20 +461,11 @@ async def test_load_and_close_serialize(
 
 
 async def test_start_worker_cancellation_settles_startup(
-    inference_pool: InferencePool, mocker
+    inference_pool: InferencePool, mocker, startup_worker
 ):
-    worker = SimpleNamespace(pid=987654)
+    worker = startup_worker
     replay_started = asyncio.Event()
     release_replay = asyncio.Event()
-
-    async def stop_worker():
-        return None
-
-    worker.stop = stop_worker
-    worker.join = lambda _timeout: None
-    worker.exitcode = 0
-    worker.close_queues = lambda: None
-    worker.retire_queues = lambda _timeout: stop_worker()
 
     async def controlled_replay(_worker):
         replay_started.set()
@@ -485,19 +487,9 @@ async def test_start_worker_cancellation_settles_startup(
 
 
 async def test_start_worker_replay_failure_kills_replacement(
-    inference_pool: InferencePool, mocker
+    inference_pool: InferencePool, mocker, startup_worker
 ):
-    worker = SimpleNamespace(pid=987654)
-    worker.kill = mocker.Mock()
-    worker.exitcode = 0
-    worker.close_queues = lambda: None
-    worker.retire_queues = lambda _timeout: stop_worker()
-
-    async def stop_worker():
-        return None
-
-    worker.stop = stop_worker
-    worker.join = lambda _timeout: None
+    worker = startup_worker
 
     async def replay_worker(_worker):
         raise RuntimeError("replay failed")

@@ -4,11 +4,57 @@ import asyncio
 import os
 from pathlib import Path
 import threading
+from types import SimpleNamespace
+from multiprocessing import get_context
+
+import pytest
 
 from mlserver.parallel.messages import ModelRequestMessage
 from mlserver.parallel.pool import InferencePool
+from mlserver.parallel.worker import Worker
 
 from tests.fixtures import SumModel
+
+
+async def test_failed_retirement_remains_retryable(monkeypatch):
+    # Unit-level ownership with actual parent pipe endpoints and a supplied
+    # confirmed-exit state. Process/reaper behavior is covered by native tests.
+    queues = [get_context("spawn").Queue(), get_context("spawn").Queue()]
+    owner = SimpleNamespace(
+        exitcode=0,
+        pid=0,
+        _queues_retired=False,
+        _requests=queues[0],
+        _model_updates=queues[1],
+        close_queues=lambda: [queue.close() for queue in queues],
+    )
+    writer = queues[0]._writer
+    original_close = writer.close
+    failure = RuntimeError("deliberate parent endpoint cleanup failure")
+
+    def fail():
+        raise failure
+
+    try:
+        monkeypatch.setattr(writer, "close", fail)
+        with pytest.raises(RuntimeError) as observed:
+            await Worker.retire_queues(owner, 1)
+        assert observed.value is failure
+        assert not owner._queues_retired
+        assert not writer.closed
+        assert queues[1]._reader.closed and queues[1]._writer.closed
+        monkeypatch.setattr(writer, "close", original_close)
+        await Worker.retire_queues(owner, 1)
+        await Worker.retire_queues(owner, 1)
+        assert owner._queues_retired
+        assert all(queue._reader.closed and queue._writer.closed for queue in queues)
+    finally:
+        monkeypatch.setattr(writer, "close", original_close)
+        for queue in queues:
+            queue.close()
+            queue._reader.close()
+            queue._writer.close()
+            queue.join_thread()
 
 
 async def test_retirement_does_not_race_feeder_connection_close(

@@ -80,6 +80,7 @@ class Worker(Process):
             self._zmq_request_endpoint = create_endpoint(Path(reply[6:]).parent, "q")
         self._requests: Queue[ModelRequestMessage] = Queue()
         self._model_updates: Queue[ModelUpdateMessage] = Queue()
+        self._queues_retired = False
         for queue in [self._requests, self._model_updates]:
             _serialize_connection_close(getattr(queue, "_reader"))
             # WorkerStop reports delivery failures. After confirmed consumer
@@ -309,8 +310,15 @@ class Worker(Process):
         self._model_updates.close()
         self._requests.close()
 
+    @property
+    def queues_retired(self) -> bool:
+        """Whether confirmed exit and parent queue retirement both completed."""
+        return self._queues_retired
+
     async def retire_queues(self, timeout: float) -> None:
         """Release parent-side writers only after the consumer has exited."""
+        if self._queues_retired:
+            return
         if self.exitcode is None:
             raise RuntimeError("Cannot retire queues before confirmed worker exit")
         self.close_queues()
@@ -334,6 +342,7 @@ class Worker(Process):
                 failures.append(error)
         if failures:
             raise failures[0]
+        self._queues_retired = True
 
     async def stop(self):
         """

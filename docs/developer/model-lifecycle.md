@@ -102,6 +102,16 @@ After startup settles, a final bounded sweep collects children which registered
 after the first sweep. Close preserves earlier cleanup failures even if this
 additional sweep succeeds.
 
+A replacement PID is owned immediately after spawn, before dispatcher registration
+can wait. This startup inventory is separate from routing and lifecycle broadcasts.
+SIGCHLD records confirmed exit there even before registration; close includes those
+children in its cleanup inventory. Retirement completion is recorded only after
+parent endpoints and feeder threads are released, and failed retirement can retry.
+An exit code alone never proves retirement. Empty replay also checks for exit before
+readiness and uses the normal worker-stop path if polling observes death first.
+Forced registration waits exercise defensive hardening; current serialized callers
+do not normally prolong that interval. Initialization still has one bounded attempt.
+
 If a killed worker leaves the response reader blocked, dispatcher shutdown reports
 that reader as unrecoverable after a bounded thread join and retains the owner.
 Python cannot forcibly terminate such a thread. This change does not add a policy

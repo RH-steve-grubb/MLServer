@@ -17,7 +17,7 @@ from ..settings import Settings, ModelSettings
 from ..env import Environment
 
 from .model import ParallelModel
-from .errors import InferencePoolUnavailable
+from .errors import InferencePoolUnavailable, WorkerStop
 from .worker import Worker, WorkerModelHook
 from .logging import logger
 from .utils import configure_inference_pool, terminate_queue
@@ -125,6 +125,7 @@ class InferencePool:
         self._env = env
         self._pool_gid = pool_gid
         self._workers: dict[int, Worker] = {}
+        self._starting_workers: dict[int, Worker] = {}
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False
@@ -194,6 +195,11 @@ class InferencePool:
             self._closing_workers[pid].record_exit(exit_code)
             return
         if pid not in self._workers:
+            # Registration may be waiting for the dispatcher lock. Its startup
+            # task still owns this child, including waitpid's confirmed status.
+            starting = self._starting_workers.get(pid)
+            if starting is not None:
+                starting.record_exit(exit_code)
             return
 
         worker = self._workers[pid]
@@ -305,6 +311,10 @@ class InferencePool:
             self._on_worker_load,
             self._on_worker_unload,
         )
+        assert worker.pid is not None
+        # Own the PID before registration can suspend, without making this
+        # child routable or eligible for lifecycle update broadcasts.
+        self._starting_workers[worker.pid] = worker
         logger.info(f"Starting new worker with PID {worker.pid} on {self.name}...")
 
         # Phase 1/2 replay runs inside the dispatcher lock via on_worker_start
@@ -313,21 +323,25 @@ class InferencePool:
         replay = self._replay_worker(worker)
         try:
             await self._dispatcher.on_worker_start(worker, replay)
+            if not self._closing:
+                exit_code = worker.exitcode
+                if exit_code is not None:
+                    # Empty replay can complete without receiving a response.
+                    # Observe a dead child instead of publishing it as ready;
+                    # this also handles an exit polled before the SIGCHLD task.
+                    await self.on_worker_stop(worker.pid, exit_code)
+                    raise WorkerStop(exit_code)
         except (Exception, asyncio.CancelledError):
             # Replay can fail through an operation error, timeout, or
             # cancellation. In every case the replacement worker is not safe
             # to publish as ready.
             assert worker.pid is not None
-            registered = worker.pid in self._workers
             self._dispatcher.on_worker_stop(worker, -1)
-            if self._closing and not registered and worker.exitcode is not None:
-                # Close may already have retired this worker. An existing
-                # failed cleanup owner stays retained; do not recreate one.
-                raise
-            self._closing_workers[worker.pid] = worker
-            if self._closing:
-                # Close joins startup before its final sweep. Transfer this
-                # owner rather than racing its stop and queue retirement.
+            if not worker.queues_retired:
+                self._closing_workers[worker.pid] = worker
+            if self._closing or worker.queues_retired:
+                # Completed retirement needs no new owner. Otherwise close
+                # joins startup before its final sweep; do not race that owner.
                 raise
             worker.kill()
             await asyncio.to_thread(
@@ -347,6 +361,7 @@ class InferencePool:
             # A deadline while waiting for dispatcher registration may leave
             # replay unawaited. Startup has settled, so it cannot run later.
             replay.close()
+            self._starting_workers.pop(worker.pid, None)
 
         if not self._closing:
             self._dispatcher.on_worker_ready(worker)
@@ -355,7 +370,7 @@ class InferencePool:
             )
         else:
             assert worker.pid is not None
-            if worker.pid in self._workers or worker.exitcode is None:
+            if not worker.queues_retired:
                 self._closing_workers[worker.pid] = worker
             self._dispatcher.on_worker_stop(worker, -1)
             return None
@@ -736,6 +751,7 @@ class InferencePool:
 
     async def _close_workers(self):
         cleanup_errors: list[BaseException] = []
+        self._closing_workers.update(self._starting_workers)
         self._closing_workers.update(self._workers)
         for pid, worker in list(self._closing_workers.items()):
             # Quarantine first, retaining the owner until process exit and
