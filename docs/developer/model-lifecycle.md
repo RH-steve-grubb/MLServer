@@ -256,6 +256,12 @@ during this conservative recovery; their committed configurations are retained.
 Other pools remain independent. Update recovery adds no work to successful
 predictions.
 
+Worker load acknowledgements precede frontend wrapper construction and staging.
+Failure in that interval also retires the attempted instance and enters owned,
+acknowledged rollback. Caller cleanup must not issue an ordinary unload against
+that abandoned candidate: doing so could commit the worker's pending replacement.
+The previous committed replay settings survive this precommit failure.
+
 The ZeroMQ parent transport revokes a selected worker instance even if its
 forwarded send has not begun on the socket owner loop. The first send step checks
 that instance's retained exit status before touching sockets. Exit zero is also

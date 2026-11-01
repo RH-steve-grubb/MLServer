@@ -486,6 +486,8 @@ class InferencePool:
         reload = self.has_model(model.settings)
         # Replay only committed fresh loads. Reloads are staged only after
         # every live worker acknowledges preparation.
+        prepared: ModelUpdateMessage | None = None
+        parallel_model: ParallelModel | None = None
         try:
             load_message = ModelUpdateMessage(
                 update_type=ModelUpdateType.Load,
@@ -493,27 +495,37 @@ class InferencePool:
                 rollback=reload,
             )
             await self._dispatch_owned(load_message)
+            prepared = load_message
+            if self._closing:
+                raise InferencePoolUnavailable(self.name)
+            self._retired_models.discard(model)
+            parallel_model = self._wrap(model)
+            if _model_load_hooks_active.get():
+                # The pool hook is preparation, not frontend publication. Replay
+                # waits for the registry to finish every subsequent hook as well.
+                self._staged[parallel_model] = (
+                    asyncio.get_running_loop().create_future()
+                )
+                parallel_model._on_load_complete = lambda: self._commit_model(
+                    parallel_model, reload
+                )
+                parallel_model._on_load_failed = lambda: self._abandon_model(
+                    parallel_model, load_message
+                )
+            else:
+                self._commit_model(parallel_model, reload)
+            return parallel_model
         except (Exception, asyncio.CancelledError):
             self._retire(model)
+            if prepared is not None and not self._closing:
+                # Worker preparation succeeded, but wrapper construction or
+                # frontend staging did not transfer ownership. Ordinary unload
+                # could publish that abandoned worker replacement. Quarantine
+                # and acknowledge rollback before any later mutation/replay.
+                self._recover_prepared(prepared)
+            if parallel_model is not None:
+                self._release_stage(parallel_model)
             raise
-        if self._closing:
-            self._retire(model)
-            raise InferencePoolUnavailable(self.name)
-        self._retired_models.discard(model)
-        parallel_model = self._wrap(model)
-        if _model_load_hooks_active.get():
-            # The pool hook is preparation, not frontend publication. Replay
-            # waits for the registry to finish every subsequent hook as well.
-            self._staged[parallel_model] = asyncio.get_running_loop().create_future()
-            parallel_model._on_load_complete = lambda: self._commit_model(
-                parallel_model, reload
-            )
-            parallel_model._on_load_failed = lambda: self._abandon_model(
-                parallel_model, load_message
-            )
-        else:
-            self._commit_model(parallel_model, reload)
-        return parallel_model
 
     def _release_stage(self, model: ParallelModel) -> None:
         future = self._staged.pop(model, None)
@@ -535,10 +547,13 @@ class InferencePool:
         if model not in self._staged:
             return
         self._retire(model)
+        self._recover_prepared(message)
+        self._release_stage(model)
+
+    def _recover_prepared(self, message: ModelUpdateMessage) -> None:
         dispatch = asyncio.get_running_loop().create_future()
         dispatch.set_result(None)
         self._begin_recovery(dispatch, message)
-        self._release_stage(model)
 
     @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
     @defer_cancellation(
