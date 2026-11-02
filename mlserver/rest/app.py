@@ -15,6 +15,7 @@ from .errors import _EXCEPTION_HANDLERS
 
 from ..settings import Settings
 from ..handlers import DataPlane, ModelRepositoryHandlers
+from ..types import InferenceResponse
 from ..tracing import get_tracer_provider
 
 
@@ -57,6 +58,25 @@ def create_app(
     endpoints = Endpoints(data_plane)
     model_repository_endpoints = ModelRepositoryEndpoints(model_repository_handlers)
 
+    infer_endpoint: Callable = endpoints.infer
+    inference_openapi = None
+    if settings.rest_worker_json:
+        from .worker import RawEndpoints
+
+        infer_endpoint = RawEndpoints(data_plane).infer
+        # A Request argument avoids frontend JSON conversion. Preserve the
+        # public body schema even though FastAPI no longer parses it here.
+        inference_openapi = {
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": {"$ref": "#/components/schemas/InferenceRequest"}
+                    }
+                },
+            }
+        }
+
     routes = [
         # Model ready
         APIRoute(
@@ -70,13 +90,17 @@ def create_app(
         # Model infer
         APIRoute(
             "/v2/models/{model_name}/infer",
-            endpoints.infer,
+            infer_endpoint,
             methods=["POST"],
+            response_model=InferenceResponse,
+            openapi_extra=inference_openapi,
         ),
         APIRoute(
             "/v2/models/{model_name}/versions/{model_version}/infer",
-            endpoints.infer,
+            infer_endpoint,
             methods=["POST"],
+            response_model=InferenceResponse,
+            openapi_extra=inference_openapi,
         ),
         # Model generate
         APIRoute(

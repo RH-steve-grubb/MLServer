@@ -79,6 +79,34 @@ The expected values are:
 - `0`, will disable the parallel inference feature.
   In other words, inference will happen within the main MLServer process.
 
+### Worker-side REST JSON
+
+Set `"rest_worker_json": true` in `settings.json`, or set
+`MLSERVER_REST_WORKER_JSON=true`, to move unary REST inference JSON parsing,
+validation and response encoding into the selected model's inference worker.
+This option defaults to `false` and requires `parallel_workers` greater than zero.
+For example:
+
+```json
+{
+  "parallel_workers": 4,
+  "rest_worker_json": true
+}
+```
+
+The frontend sends the original JSON bytes through the existing multiprocessing
+Queue/pickle transport instead of constructing and serializing the large Python
+input objects there. Each worker runs the ordinary DataPlane, including model
+input preparation and middleware, then returns encoded JSON and response headers.
+Inference metrics remain in the frontend so they survive worker replacement.
+This can improve throughput for large numeric JSON inputs; qualify the worker
+count and performance with the target model and workload.
+
+When server response caching is enabled, requests retain the frontend path to
+preserve the shared cache. Models using adaptive batching, nonparallel models
+and non-JSON requests also retain frontend preparation. Generate, streaming
+and gRPC routes are unchanged.
+
 ## References
 
 ```{bibliography}
