@@ -38,6 +38,106 @@ def request_message() -> ModelRequestMessage:
     return ModelRequestMessage(model_name="selected", method_name="predict")
 
 
+async def test_failed_socket_retirement_keeps_owner_and_attempts_other_sockets(
+    directory, monkeypatch
+):
+    parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
+    parent.start(lambda _: None, lambda _: None)
+    workers = [worker(directory, parent._reply_endpoint) for _ in range(2)]
+    sockets = [transport._socket(parent._context, zmq.PUSH) for _ in workers]
+    parent._requests.update(zip(workers, sockets))
+    cleanup = OSError("socket release did not complete")
+
+    def fail():
+        raise cleanup
+
+    monkeypatch.setattr(sockets[0], "close", fail)
+    try:
+        with pytest.raises(OSError) as observed:
+            parent.forget_worker(workers[0], 0)
+        assert observed.value is cleanup
+        assert parent._requests[workers[0]] is sockets[0]
+        assert not sockets[0].closed
+        from mlserver.parallel.errors import WorkerStop
+
+        with pytest.raises(WorkerStop):
+            await parent.send(workers[0], request_message())
+        with pytest.raises(OSError) as observed:
+            await parent.close()
+        assert observed.value is cleanup
+        assert sockets[1].closed
+        assert not sockets[0].closed and not parent._context.closed
+        assert parent._requests == {workers[0]: sockets[0]}
+        with pytest.raises(OSError) as repeated:
+            await parent.close()
+        assert repeated.value is cleanup
+    finally:
+        monkeypatch.undo()
+        # Also release the affected baseline's socket, which it no longer owns.
+        for sock in sockets:
+            sock.close()
+        if parent._close_task is None:
+            await parent.close()
+        else:
+            # Test-only cleanup after the recorded terminal close failure.
+            await parent._close()
+
+
+async def test_receive_failure_notifies_waiters_despite_socket_cleanup_failure(
+    directory, monkeypatch
+):
+    failures = []
+    parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
+    parent.start(lambda _: None, failures.append)
+    selected = worker(directory, parent._reply_endpoint)
+    sock = transport._socket(parent._context, zmq.PUSH)
+    sock.connect(selected._zmq_request_endpoint)
+    parent._requests[selected] = sock
+    peer = transport._socket(parent._context, zmq.PUSH)
+    peer.connect(parent._reply_endpoint)
+    cleanup = OSError("request socket cleanup failed")
+
+    def fail():
+        raise cleanup
+
+    entered = asyncio.Event()
+    original_send = sock.send
+
+    def send(*args, **kwargs):
+        result = original_send(*args, **kwargs)
+        entered.set()
+        return result
+
+    monkeypatch.setattr(sock, "close", fail)
+    monkeypatch.setattr(sock, "send", send)
+    sending = asyncio.create_task(parent.send(selected, request_message()))
+    try:
+        # IMMEDIATE keeps this real send pending without a connected peer.
+        # The callback proves entry before the malformed reply fails reception.
+        await asyncio.wait_for(entered.wait(), 5)
+        assert parent._pending_sends[selected]
+        await peer.send(b"invalid pickle")
+        await asyncio.wait_for(
+            asyncio.gather(parent._receiver, return_exceptions=True), 5
+        )
+        assert failures == [parent._failure]
+        assert getattr(parent._failure, "cleanup_error") is cleanup
+        assert parent._requests[selected] is sock and not sock.closed
+        done, _ = await asyncio.wait({sending}, timeout=1)
+        assert sending in done, "socket cleanup failure stranded a pending send"
+        failure = parent._failure
+        assert isinstance(failure, Exception)
+        with pytest.raises(type(failure)):
+            sending.result()
+    finally:
+        sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
+        monkeypatch.undo()
+        peer.close()
+        sock.close()
+        await parent.close()
+
+
 async def stop(task: asyncio.Task) -> None:
     task.cancel()
     await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2)

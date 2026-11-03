@@ -237,9 +237,13 @@ class Dispatcher:
             del self._ready_workers[pid]
 
         self._reset_round_robin()
-        if self._transport is not None and pid is not None:
-            self._transport.forget_worker(worker, exit_code)
-        self._async_responses.cancel(worker, exit_code)
+        try:
+            if self._transport is not None and pid is not None:
+                self._transport.forget_worker(worker, exit_code)
+        finally:
+            # Socket retirement can fail after routing has been revoked. The
+            # response waiters still need this incarnation's terminal result.
+            self._async_responses.cancel(worker, exit_code)
 
     def start(self):
         self._active = True

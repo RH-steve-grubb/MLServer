@@ -102,7 +102,13 @@ class ParentTransport:
             raise
         except Exception as error:
             self._failure = error
-            self._close_requests()
+            try:
+                self._close_requests()
+            except (Exception, asyncio.CancelledError) as cleanup:
+                setattr(error, "cleanup_error", cleanup)
+                logger.error(
+                    "ZeroMQ request cleanup failed; owner retained", exc_info=True
+                )
             try:
                 failed(error)
             except Exception:
@@ -206,14 +212,31 @@ class ParentTransport:
         for completed in self._pending_sends.get(worker, ()):
             if not completed.done():
                 completed.set_exception(WorkerStop(exit_code))
-        sock = self._requests.pop(worker, None)
+        sock = self._requests.get(worker)
         if sock is not None:
             sock.close()
+            # A close request which raises does not establish release. Keep
+            # the socket reachable for terminal cleanup, separately from routing.
+            self._requests.pop(worker, None)
 
     def _close_requests(self) -> None:
-        for sock in self._requests.values():
-            sock.close()
-        self._requests.clear()
+        # A caller can still be awaiting send rather than its response future.
+        # Settle that wait independently of native socket closure, which can fail.
+        error = self._failure or RuntimeError("ZeroMQ inference send was stopped")
+        for pending in self._pending_sends.values():
+            for completed in pending:
+                if not completed.done():
+                    completed.set_exception(error)
+        failures: list[BaseException] = []
+        for worker, sock in list(self._requests.items()):
+            try:
+                sock.close()
+            except (Exception, asyncio.CancelledError) as error:
+                failures.append(error)
+            else:
+                self._requests.pop(worker, None)
+        if failures:
+            raise failures[0]
 
     async def close(self) -> None:
         """Cancel reception and discard unsent IPC messages during shutdown."""

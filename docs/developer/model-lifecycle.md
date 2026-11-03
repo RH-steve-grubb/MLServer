@@ -107,6 +107,14 @@ replay merely because a worker restarts. A stopped worker is revoked from routin
 and transport sends, including sends queued from a foreign event loop. Confirmed
 process exit and successful parent queue/feeder retirement are separate events.
 
+Worker-stop and replay rollback transfer retirement ownership before transport
+revocation. A socket-close error still permits response failure notification,
+independent worker cleanup and the existing bounded replacement obligation.
+Unreleased sockets remain owned by the transport, independently of child exit and
+queue retirement. Replay keeps its initiating error and exposes a secondary
+`cleanup_error`; failed cleanup stays observable and unfinished resources stay
+owned. This does not add a restart retry loop.
+
 Shutdown requests closure before waiting for lifecycle locks. Each manager retains
 one close operation; repeated callers join it and observe its result/error.
 Cancellation of a close waiter does not cancel cleanup. Existing deadlines and
