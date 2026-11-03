@@ -115,6 +115,18 @@ queue retirement. Replay keeps its initiating error and exposes a secondary
 `cleanup_error`; failed cleanup stays observable and unfinished resources stay
 owned. This does not add a restart retry loop.
 
+Automatic replacement includes queue allocation and process start in that same
+rollback boundary. An acquisition failure retires only the candidate acquired by
+that accepted attempt; it does not wait for the whole pool to close. A candidate
+without a PID can still own parent queues. Failed rollback retains the candidate
+and cleanup error, while healthy siblings continue serving committed state. Close
+can take over the retained cleanup through its existing bounded shutdown path.
+
+That receiving close inventory also accepts never-started candidates. A missing
+PID requires queue/feeder retirement without process stop, kill, join or an exit
+status. The owner remains if release fails. Worker-stop hooks apply to started
+workers; a partially acquired candidate does not become one through cleanup.
+
 Shutdown requests closure before waiting for lifecycle locks. Each manager retains
 one close operation; repeated callers join it and observe its result/error.
 Cancellation of a close waiter does not cancel cleanup. Existing deadlines and

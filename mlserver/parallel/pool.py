@@ -370,7 +370,23 @@ class InferencePool:
     async def _initialize_worker(self) -> Worker | None:
         if self._closing:
             return None
-        worker = _spawn_worker(self)
+        # Spawn may acquire queues or expose a child before returning. The
+        # operation lock serializes attempts; select only this attempt's new
+        # owner, leaving older failed cleanup and healthy siblings untouched.
+        unstarted = self._unstarted_workers.copy()
+        try:
+            worker = _spawn_worker(self)
+        except (Exception, asyncio.CancelledError) as primary:
+            for candidate in self._unstarted_workers - unstarted:
+                try:
+                    await self._rollback_worker(candidate)
+                except (Exception, asyncio.CancelledError) as cleanup:
+                    setattr(primary, "cleanup_error", cleanup)
+                    logger.error(
+                        "Replacement acquisition rollback failed; owner retained",
+                        exc_info=True,
+                    )
+            raise
         assert worker.pid is not None
         # Own the PID before registration can suspend, without making this
         # child routable or eligible for lifecycle update broadcasts.
@@ -428,6 +444,9 @@ class InferencePool:
         # An unresolved socket remains owned by the transport independently.
         if not worker.queues_retired:
             self._closing_workers[id(worker)] = worker
+        # Acquisition can fail before a PID exists. Drop its earlier slot only
+        # after the retirement owner above can manage those partial resources.
+        self._unstarted_workers.discard(worker)
         failures: list[BaseException] = []
         try:
             self._dispatcher.on_worker_stop(worker, -1)
@@ -437,12 +456,14 @@ class InferencePool:
         # already took ownership, do not start a competing native retirement.
         if not self._closing and not worker.queues_retired:
             try:
-                if worker.exitcode is None:
+                # Partial queue allocation has no PID. It still needs parent
+                # resource cleanup, without claiming a child ever existed.
+                if worker.pid is not None and worker.exitcode is None:
                     worker.kill()
                     await asyncio.to_thread(
                         worker.join, self._settings.parallel_workers_timeout
                     )
-                if worker.exitcode is None:
+                if worker.pid is not None and worker.exitcode is None:
                     raise RuntimeError(f"Worker {worker.pid} has not confirmed exit")
                 await worker.retire_queues(self._settings.parallel_workers_timeout)
             except (Exception, asyncio.CancelledError) as error:
@@ -883,6 +904,17 @@ class InferencePool:
         self._closing_workers.update((id(w), w) for w in self._workers.values())
         for worker in list(self._closing_workers.values()):
             pid = worker.pid
+            if pid is None:
+                # Failed acquisition can transfer real queues here before a
+                # process exists. None is not a live-child exit status; release
+                # parent resources without stop/kill/join or worker-stop hooks.
+                try:
+                    await worker.retire_queues(self._settings.parallel_workers_timeout)
+                except (Exception, asyncio.CancelledError) as error:
+                    cleanup_errors.append(error)
+                else:
+                    self._closing_workers.pop(id(worker), None)
+                continue
             # Quarantine first, retaining the owner until process exit and
             # parent queue retirement are confirmed. A kill is only a request.
             try:
