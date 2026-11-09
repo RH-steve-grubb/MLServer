@@ -306,6 +306,13 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
     expected_name: str,
     sum_model_settings: ModelSettings,
 ):
+    # Purpose: Check registry handling of default/keyed pools whose close reports
+    # failure.
+    # Expect: The pool leaves the active lookup but remains in failed ownership,
+    # blocking same-key loads until confirmed release.
+    # Method: Use a failing pool double, inspect active/failed inventories and retry
+    # rejection, then permit close for test teardown; this case does not prove native
+    # exit.
     class FailingPool:
         failure = True
         name = expected_name

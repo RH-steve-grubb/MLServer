@@ -41,6 +41,13 @@ def request_message() -> ModelRequestMessage:
 async def test_failed_socket_retirement_keeps_owner_and_attempts_other_sockets(
     directory, monkeypatch
 ):
+    # Purpose: Exercise native request-socket close failure during worker revocation and
+    # transport close.
+    # Expect: The worker stays revoked, the failed socket/context remain owned, other
+    # sockets close and repeated public close reports the same error.
+    # Method: Register two real sockets, fault one close, attempt an old send and
+    # inspect actual closed flags plus retained socket identity before test-only
+    # teardown.
     parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
     parent.start(lambda _: None, lambda _: None)
     workers = [worker(directory, parent._reply_endpoint) for _ in range(2)]
@@ -86,6 +93,12 @@ async def test_failed_socket_retirement_keeps_owner_and_attempts_other_sockets(
 async def test_receive_failure_notifies_waiters_despite_socket_cleanup_failure(
     directory, monkeypatch
 ):
+    # Purpose: Combine receive failure with failed close of a socket whose real native
+    # send remains pending.
+    # Expect: Failure notification still settles that send and retains the primary
+    # receive error plus secondary cleanup error and socket owner.
+    # Method: Observe send entry without a connected peer, inject a malformed reply
+    # through a real socket and inspect waiter completion and the callback's error.
     failures = []
     parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
     parent.start(lambda _: None, failures.append)
@@ -486,6 +499,12 @@ async def test_worker_replacement_forgets_socket_and_reconnects(
 async def test_parent_constructor_delays_receiver_and_close_releases_descriptors(
     directory: Path,
 ) -> None:
+    # Purpose: Check lightweight transport construction, explicit activation and
+    # terminal repeated close.
+    # Expect: Construction starts no receiver; repeated start shares it, close releases
+    # native descriptors and a closed transport cannot restart.
+    # Method: Repeat real context/socket activation and closure, compare live descriptor
+    # counts and inspect receiver identity and actual closed flags.
     before = len(list(Path("/proc/self/fd").iterdir()))
     for _ in range(4):
         parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
@@ -506,6 +525,11 @@ async def test_parent_constructor_delays_receiver_and_close_releases_descriptors
 
 
 async def test_parent_bind_failure_closes_sockets_and_context(directory: Path) -> None:
+    # Purpose: Exercise reply bind failure after native context/socket allocation.
+    # Expect: The transport's retained owner must close partial setup without leaving
+    # native descriptors.
+    # Method: Bind under a missing IPC directory, close in finally and compare
+    # descriptor counts before and after the real failure.
     before = len(list(Path("/proc/self/fd").iterdir()))
     parent = transport.ParentTransport(f"ipc://{directory / 'missing' / 'reply.sock'}")
     try:
@@ -517,6 +541,10 @@ async def test_parent_bind_failure_closes_sockets_and_context(directory: Path) -
 
 
 async def test_parent_socket_creation_failure_releases_context() -> None:
+    # Purpose: Exercise parent setup failing before a socket helper returns a handle.
+    # Expect: The already retained context still receives its termination call.
+    # Method: Use a context double and failing socket helper, then call public close and
+    # inspect termination; native partial-handle behavior has separate probes.
     context = Mock()
     with patch.object(
         transport.zmq.asyncio, "Context", return_value=context
@@ -531,6 +559,12 @@ async def test_parent_socket_creation_failure_releases_context() -> None:
 
 
 async def test_parent_close_waiter_cancellation_retains_native_cleanup(directory):
+    # Purpose: Exercise caller cancellation while parent transport close waits for
+    # receiver cleanup.
+    # Expect: A repeated close joins the retained operation and eventually releases the
+    # real reply socket/context.
+    # Method: Replace the receiver with an event-held finally block, cancel only the
+    # first waiter and release it after the second joins.
     parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
     parent.start(Mock(), Mock())
     parent._receiver.cancel()
@@ -573,6 +607,13 @@ async def test_parent_close_waiter_cancellation_retains_native_cleanup(directory
 async def test_worker_partial_socket_setup_is_cleaned(
     directory: Path, term_fails
 ) -> None:
+    # Purpose: Exercise worker reply-socket setup failure after request-socket
+    # acquisition, including a context-termination error.
+    # Expect: The initiating setup error stays primary, acquired sockets close and
+    # failed context cleanup remains owned with its secondary error.
+    # Method: Use ownership-aware socket/context doubles, fail the second acquisition
+    # and optional term, then inspect close calls, error identity and the worker
+    # resource owner.
     context, requests = Mock(), Mock()
     primary = RuntimeError("socket failed")
     cleanup = RuntimeError("context retirement failed")
@@ -602,6 +643,11 @@ async def test_worker_partial_socket_setup_is_cleaned(
 
 
 def test_socket_option_failure_closes_partial_socket() -> None:
+    # Purpose: Exercise helper rollback when options fail on a returned socket.
+    # Expect: The setup error must propagate after requesting non-lingering socket
+    # close.
+    # Method: Use a socket double whose setsockopt raises and verify close(linger=0);
+    # the subprocess matrix establishes actual native release behavior.
     context, sock = Mock(), Mock()
     context.socket.return_value = sock
     sock.setsockopt.side_effect = RuntimeError("option failed")

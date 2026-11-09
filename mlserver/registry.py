@@ -115,6 +115,8 @@ class SingleModelRegistry:
         # These are resource owners, separate from entries eligible for serving.
         # Failed cleanup stays here until an explicit unload retries it.
         self._cleanup_tasks: dict[MLModel, asyncio.Task] = {}
+        # Keep the dependency separately: cancelling a cleanup task must not
+        # let its retry unload resources while native preparation is still live.
         self._cleanup_preparations: dict[MLModel, asyncio.Task] = {}
         self._default: MLModel | None = None
 

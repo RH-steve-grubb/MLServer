@@ -31,6 +31,12 @@ def fail_candidate_wrapper(pool, monkeypatch, *, persistent=False):
 async def test_wrapper_failure_preserves_frontend_and_replay(
     settings, sum_model_settings, monkeypatch, cleanup_fails
 ):
+    # Purpose: Exercise frontend wrapper failure after simulated worker preparation
+    # acknowledgements, including failed rollback wrapping.
+    # Expect: The old frontend identity and committed replay settings survive;
+    # initiating and cleanup errors remain observable.
+    # Method: Use a zero-worker pool with controlled acknowledgements, fault candidate
+    # wrapping and compare frontend/replay state before restoring cleanup.
     settings.parallel_workers = 0
     pool = InferencePool(settings)
     await pool.start()
@@ -75,6 +81,12 @@ async def test_wrapper_failure_preserves_frontend_and_replay(
 async def test_native_wrapper_failure_cannot_publish_through_retry_or_unload(
     settings, sum_model_settings, monkeypatch, transport, replacement
 ):
+    # Purpose: Exercise post-acknowledgement wrapper failure with a real Queue/ZeroMQ
+    # worker for fresh and replacement loads.
+    # Expect: Acknowledged rollback excludes the abandoned candidate from later unload,
+    # replay and retry publication.
+    # Method: Mark committed/abandoned/retried settings, fault wrapping, await recovery
+    # and query actual worker metadata across unload or retry.
     if transport == "zmq":
         pytest.importorskip("zmq")
     settings.parallel_inference_transport = transport

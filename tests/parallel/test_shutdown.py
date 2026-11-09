@@ -13,6 +13,12 @@ from mlserver.settings import Settings
 async def test_close_joins_blocked_response_reader_before_closing_queue(
     settings: Settings, mocker: MockerFixture
 ) -> None:
+    # Purpose: Exercise default Queue shutdown with its real response reader blocked in
+    # get.
+    # Expect: Both the response task and executor reader thread finish before
+    # Queue.close invalidates their native handle.
+    # Method: Observe Queue.get entry with a threading event, record task/thread state
+    # at actual queue close, and verify child exit plus idempotent close.
     pool = InferencePool(settings)
     entered = Event()
     original_get = Queue.get

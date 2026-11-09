@@ -20,8 +20,8 @@ A public `(name, version)` identifies a lookup, not a unique lifetime. Replaceme
 instances can have exactly the same name/version. A worker PID likewise identifies
 an OS process number, not an incarnation forever. Resource cleanup follows the
 actual instance. Worker update messages have distinct UUIDs, so an old response
-cannot complete a newer update. These are internal lifecycle identities; W0 does
-not introduce request-generation leases.
+cannot complete a newer update. These are internal lifecycle identities; they do
+not establish lifetime ownership for every accepted inference request.
 
 ## State has several independent dimensions
 
@@ -40,26 +40,48 @@ after an unacknowledged cleanup update. An abandoned candidate can be absent fro
 lookups while its native preparation remains owned. Observability must preserve
 these distinctions.
 
-The frontend flow is:
+The frontend flow is shown in plain text so it can be read alongside source and
+test output. These are descriptive transitions enforced by the existing locks,
+owned tasks and identity checks; there is no central state-machine engine.
 
-```mermaid
-stateDiagram-v2
-    [*] --> WaitingForLock
-    WaitingForLock --> Preparing: mutation accepted
-    WaitingForLock --> [*]: caller cancels before acceptance
-    Preparing --> Committed: load succeeds / replacement publishes
-    Preparing --> Retired: failure or deadline before commit
-    Committed --> Retired: explicit unload or displacement
-    Retired --> Released: cleanup confirmed
-    Retired --> CleanupFailed: cleanup fails
-    CleanupFailed --> Retired: supported cleanup retry
-    Released --> [*]
+```text
+                         load requested
+                               |
+                               v
+                       waiting for locks ---- caller cancels ---> no mutation
+                               |
+                         mutation accepted
+                               |
+                               v
+                      preparing candidate
+                        /             \
+             failure / deadline        preparation succeeds
+                     |                         |
+                     v                         v
+              retire candidate          publish candidate [COMMIT]
+                     |                         |
+                     v                         v
+               owned cleanup           cleanup displaced instance
+                /        \                /               \
+           confirmed    failed        confirmed           failed
+               |           |              |                 |
+               v           v              v                 v
+            released    retained       old instance    retained old owner
+                        owner/error      released       and cleanup error
+                           |                               |
+                  explicit cleanup retry         candidate stays committed
 ```
 
 This diagram omits the parallel pool's separate recovery state. A model mutation
 can leave the caller while a retained owner continues preparing, reconciling or
 cleaning. A failed pool close has a recorded terminal result, rather than the
 local model cleanup retry shown above.
+
+During replacement preparation the old frontend instance stays selected. A
+fresh candidate may have a not-ready loading entry. Candidate cleanup waits for
+its owned preparation to settle; a deadline does not skip that dependency.
+Explicit unload or a later replacement retires a committed instance through the
+same owned-cleanup path. Worker routing eligibility is a separate dimension.
 
 ## Load, replacement and unload
 
@@ -138,7 +160,8 @@ using them. Borrowed environments are never deleted.
 
 Instrumentation should record transitions and their owners, rather than infer
 release or rollback from a caller's outcome. The following are semantic event/span
-boundaries for future work; W0 does not implement these proposed signals.
+boundaries for future instrumentation; these proposed signals are not implemented
+by the lifecycle repairs described here.
 
 | Boundary | Observation that matters |
 | --- | --- |
@@ -154,10 +177,10 @@ boundaries for future work; W0 does not implement these proposed signals.
 
 Logs/traces can correlate public model identity, an instance/operation correlation
 identifier, pool key, worker incarnation/PID, message UUID and transport. Correlation
-identifiers must describe actual implementation identities, not imply that W3
-request ownership already exists. Avoid unbounded IDs as metric labels. Phase,
-outcome and transport can support bounded counters/histograms; per-model or pool
-labels need an explicit cardinality policy. Gauges for registered/loading models,
+identifiers must describe actual implementation identities, without implying that
+all accepted requests carry generation ownership. Avoid unbounded IDs as metric
+labels. Phase, outcome and transport can support bounded counters/histograms;
+per-model or pool labels need an explicit cardinality policy. Gauges for registered/loading models,
 routable workers, quarantined pools and retained cleanup owners represent different
 quantities and must not be combined into a single "loaded" count.
 
@@ -175,14 +198,46 @@ can retain a model name indefinitely; unconfirmed native or reader cleanup remai
 an observable terminal failure. Arbitrary detached extension work is unsupported
 unless its author supplies independent ownership and timeout boundaries.
 
-W0 protects model publication, rollback identity, replay eligibility, quarantine,
-worker/send ownership and repeatable cleanup outcomes at tested boundaries. It
-does not guarantee safe retirement of every previously accepted inference holding
-an old instance, nor provide general accepted/queued/in-flight generation leases.
-That broader request ownership remains W3 work. Placement, caching, admission and
-inference offloading must not infer those guarantees from W0.
+These lifecycle mechanisms protect publication, rollback identity, replay
+eligibility, quarantine, worker/send ownership and repeatable cleanup outcomes at
+tested boundaries. They do not guarantee safe retirement of every previously
+accepted inference holding an old instance, nor provide general
+accepted/queued/in-flight generation leases.
+That broader request-ownership contract needs separate implementation and
+qualification before placement, caching, admission or inference offloading can
+rely on safe retirement of all previously accepted requests.
 
 The detailed ownership and failure contracts below qualify these flows.
+
+### Regression test guide
+
+The test context blocks describe each scenario, expected result and controlled
+ordering. The main starting points are:
+
+| Boundary | Tests |
+| --- | --- |
+| Local preparation, wrapper substitution, publication and failed cleanup | `tests/test_lifecycle_ownership.py` |
+| Partial worker acknowledgement, late settlement and exact-version rollback | `tests/parallel/test_lifecycle_recovery.py` |
+| Pool activation and partially acquired replacement workers | `tests/parallel/test_construction_ownership.py`, `test_replacement_ownership.py`, `test_no_pid_ownership.py` |
+| Worker-incarnation revocation before queued sends begin | `tests/parallel/test_zmq_queued_send.py` |
+| Native socket setup combined with failed rollback | `tests/parallel/test_zmq_acquisition.py` |
+| Retained close, parent queues and environment release | `tests/parallel/test_close_ownership.py`, `test_queue_cleanup.py`, `test_environment_ownership.py` |
+
+The socket-acquisition tests supervise disposable subprocesses because a native
+`Context.term()` hang prevents an asyncio watchdog on that same loop from running.
+They use real sockets with worker identity doubles; separate integration tests
+establish real model-worker exit and replay behavior. With the optional ZeroMQ
+dependency installed, run that native matrix with either probe-loop policy:
+
+```sh
+poetry run pytest tests/parallel/test_zmq_acquisition.py
+MLSERVER_TEST_SOCKET_LOOP_POLICY=uvloop poetry run pytest tests/parallel/test_zmq_acquisition.py
+```
+
+The default probe policy is standard asyncio. `MLSERVER_TEST_SOCKET_EVIDENCE` can
+select a directory for child status/stderr; otherwise pytest's temporary directory
+is used. These controls affect tests only. Process/queue tests use local trusted
+fixtures and synchronization; they require no downloaded model or GPU.
 
 ## Detailed ownership contract
 
@@ -276,6 +331,38 @@ during this conservative recovery; their committed configurations are retained.
 Other pools remain independent. Update recovery adds no work to successful
 predictions.
 
+For an abandoned load delivered to workers, recovery follows this separate flow:
+
+```text
+                  update delivered to workers
+                       /               \
+              required acks       timeout/error/uncertain outcome
+                   |                         |
+                   v                         v
+            staged preparation        quarantine this pool
+            (not yet published)       retain committed replay settings
+                                             |
+                                             v
+                                  await original update settlement
+                                             |
+                                             v
+                                  rollback exact attempted instance
+                                             |
+                                  rollback acknowledged?
+                                      /           \
+                                    yes            no
+                                     |              |
+                                     v              v
+                           restore confirmed     retain failure and
+                           surviving workers     quarantine; close
+                           to routing            remains available
+```
+
+Dead workers do not return to routing. Replacement replay joins recovery and
+uses committed settings, so abandoned preparation cannot become desired state.
+If the delivered update never settles, recovery stays owned; close can instead
+establish safety through confirmed child exit and parent-resource retirement.
+
 Worker load acknowledgements precede frontend wrapper construction and staging.
 Failure in that interval also retires the attempted instance and enters owned,
 acknowledged rollback. Caller cleanup must not issue an ordinary unload against
@@ -322,6 +409,37 @@ They create one retained cleanup task. Concurrent or repeated callers join it;
 cancelling a caller stops only that caller's wait. Completed errors are reported
 again. Pool close attempts independent cleanup even after a failure. A failed
 pool is retained separately from pools eligible for new loads.
+
+Partial acquisition determines which retirement actions are valid:
+
+```text
+                     retained Worker owner
+                       /              \
+                  no PID             PID exposed
+                     |                    |
+                     |             stop / bounded escalation
+                     |                    |
+                     |              confirm child exit
+                     |                    |
+                     +---------+----------+
+                               |
+                               v
+                   retire parent queues/feeders
+                       /              \
+                    success          failure
+                       |                |
+                       v                v
+                 release owner     retain owner/error and
+                                   dependent files
+```
+
+A failed exit confirmation stays owned too and does not advance to the
+confirmed-exit branch. A never-started candidate can own real queues, but has no
+child to stop, kill or join. After workers retire, dispatcher reader and socket
+cleanup must also succeed before endpoint directories and owned environments can
+be released. Socket close failure retains its native handle and prevents entry
+into blocking context termination. A successful child exit alone proves none of
+those parent-resource releases.
 
 Lock draining uses the existing model-operation timeout. Worker shutdown uses
 `parallel_workers_timeout` for graceful stop, then kill and bounded join. A worker

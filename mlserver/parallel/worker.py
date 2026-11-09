@@ -337,6 +337,9 @@ class Worker(Process):
         if self.pid is not None and self.exitcode is None:
             raise RuntimeError("Cannot retire queues before confirmed worker exit")
         self.close_queues()
+        # Queue's public API provides neither a bounded feeder join nor a way
+        # to break a full pipe after consumer exit. Retire these CPython parent
+        # handles explicitly; native queue/race regressions guard this boundary.
         failures = []
         for queue in self._queues:
             try:

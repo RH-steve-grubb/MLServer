@@ -41,6 +41,12 @@ async def test_restart_dependency_retains_capacity_or_joins_close(
     outcome,
     expire_wait,
 ):
+    # Purpose: Exercise worker death while staged publication or recovery blocks
+    # replacement, including waits longer than the initialization budget.
+    # Expect: The restart obligation survives the dependency wait and restores committed
+    # capacity, or close joins it without spawning late work.
+    # Method: Use real one/two-worker pools with hook/file barriers, observe restart
+    # entry, then release or close and address each restored worker for metadata.
     settings.parallel_workers = workers
     settings.model_operation_timeout = 15
     settings.worker_start_timeout = 3
@@ -201,6 +207,12 @@ async def pause_replay(model):
 async def test_close_during_native_start_joins_restart_owner(
     settings, sum_model_settings, tmp_path, monkeypatch, phase
 ):
+    # Purpose: Exercise close after a replacement child exists but registration or
+    # replay remains unfinished.
+    # Expect: Close must collect that child and its queues without publishing late
+    # routing or losing the restart owner.
+    # Method: Hold the registration lock or a worker replay file barrier, force close's
+    # bounded drain and inspect every original/replacement child's final state.
     settings.parallel_workers = 1
     settings.model_operation_timeout = 15
     settings.worker_start_timeout = 3
@@ -278,6 +290,12 @@ async def test_close_during_native_start_joins_restart_owner(
 async def test_failed_restart_is_bounded_observable_and_not_retried(
     settings, sum_model_settings, tmp_path, monkeypatch, caplog, failure
 ):
+    # Purpose: Exercise spawn, replay and registration-timeout failure during automatic
+    # replacement.
+    # Expect: Exactly one attempt is logged; committed replay settings remain while
+    # failed children retire and routing stays unavailable.
+    # Method: Kill a real worker, inject the selected fault, wait for the restart
+    # completion marker and count spawns, owners and confirmed child exits.
     settings.parallel_workers = 1
     settings.model_operation_timeout = 15
     settings.worker_start_timeout = 3

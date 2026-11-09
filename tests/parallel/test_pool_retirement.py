@@ -93,6 +93,12 @@ async def exercise_staged_owner(settings, first, outcome, inference_request):
 async def test_staged_owner_controls_pool_retirement(
     settings, sum_model_settings, inference_request, pool_gid, outcome
 ):
+    # Purpose: Exercise unload of the last committed model while another model is staged
+    # in the same default or named pool.
+    # Expect: Accepted staging keeps the pool alive until publication or acknowledged
+    # failure/timeout cleanup; final empty named pools then retire.
+    # Method: The shared helper pauses a later frontend hook with events, unloads the
+    # first model and checks real serving or cleanup for each outcome.
     first = sum_model_settings.model_copy(deep=True)
     first.parameters.inference_pool_gid = pool_gid
     await exercise_staged_owner(settings, first, outcome, inference_request)
@@ -102,6 +108,12 @@ async def test_staged_owner_controls_pool_retirement(
 async def test_staged_owner_controls_custom_environment_retirement(
     settings, existing_env_model_settings, inference_request, outcome
 ):
+    # Purpose: Exercise the staged-owner retirement contract in a custom-environment
+    # pool.
+    # Expect: Removing its last committed model cannot destroy accepted preparation;
+    # success/failure/timeout eventually releases the appropriate pool owner.
+    # Method: Run the shared event-controlled staging scenario through the existing
+    # approved environment fixture and observe serving and confirmed child exit.
     # Reuse the repository's existing custom-environment fixture and trust mode.
     try:
         await exercise_staged_owner(
@@ -113,6 +125,12 @@ async def test_staged_owner_controls_custom_environment_retirement(
 
 
 async def test_failed_fresh_pool_load_can_retire_its_recovery_owner(settings):
+    # Purpose: Exercise a failed fresh load that is the only model owner of a named
+    # pool.
+    # Expect: Recovery ownership must permit eventual automatic retirement rather than
+    # keeping an empty pool and workers indefinitely.
+    # Method: Use the trusted ErrorModel, retain the actual acquired workers, await the
+    # failed registry load and inspect pool removal and child liveness.
     settings.parallel_workers = 1
     settings.model_operation_timeout = 10
     pools = InferencePoolRegistry(settings)

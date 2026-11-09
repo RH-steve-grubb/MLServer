@@ -524,6 +524,12 @@ async def test_deferred_timeout_starts_after_lock_acquisition():
 
 
 async def test_owned_background_operation_has_independent_deadline():
+    # Purpose: Exercise an independently owned task spawned within a deferred-
+    # cancellation boundary.
+    # Expect: The background operation enforces its own short deadline despite the
+    # parent's inherited nested context.
+    # Method: Use create_task_independent inside a long-deadline launcher, synchronize
+    # background entry with events and await its timeout separately.
     from mlserver.utils import create_task_independent
 
     entered = asyncio.Event()

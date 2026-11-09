@@ -34,6 +34,13 @@ async def wait_until(predicate):
 async def test_stop_before_forwarded_send_starts(
     monkeypatch, transport, exit_code, order
 ):
+    # Purpose: Exercise stop/cancellation orderings after foreign-loop request
+    # submission but before the owner-loop ZeroMQ send begins.
+    # Expect: Stop alone returns WorkerStop even for exit zero; genuine cancellation
+    # remains cancellation, and no old socket, waiter or caller thread survives.
+    # Method: Use Worker doubles, real IPC sockets and a foreign caller loop;
+    # callback/thread barriers queue stop and cancellation before send resumes. The
+    # Queue variants are compatibility controls.
     owner = asyncio.get_running_loop()
     responses = get_context("spawn").Queue()
     done, response_done = Event(), asyncio.Event()
@@ -193,6 +200,12 @@ async def test_stop_before_forwarded_send_starts(
 async def test_cancellation_after_worker_error_completion_preserves_result(
     responses, monkeypatch, exit_code
 ):
+    # Purpose: Check cancellation attempted only after a request has already completed
+    # with WorkerStop.
+    # Expect: The later cancel is rejected and cannot replace the completed error or
+    # retain response bookkeeping.
+    # Method: Observe response registration, report worker exit zero/nonzero, await the
+    # error and then inspect cancel's return value and the stored result.
     worker = Mock(spec=Worker, pid=42)
     dispatcher = Dispatcher({42: worker}, responses)
     registered = asyncio.Event()
@@ -227,6 +240,13 @@ async def test_cancellation_after_worker_error_completion_preserves_result(
 
 
 async def test_old_identity_cannot_send_or_close_replacement_with_same_pid():
+    # Purpose: Exercise distinct worker incarnations sharing a numeric PID with real
+    # ZeroMQ sockets.
+    # Expect: Old sends fail with the retained exit-zero status while duplicate/stale
+    # stop cannot close the replacement's working socket.
+    # Method: Run the production child socket coroutine on a Worker double, stop a
+    # blocked old send and exchange actual replies with the replacement before and after
+    # stale cleanup.
     pytest.importorskip("zmq")
     from mlserver.parallel.zmq import ParentTransport, create_endpoint, serve_requests
     from mlserver.parallel.messages import ModelResponseMessage
@@ -288,6 +308,12 @@ async def test_old_identity_cannot_send_or_close_replacement_with_same_pid():
 
 
 async def test_delayed_old_stop_preserves_replacement_routing_and_response():
+    # Purpose: Exercise stale worker-stop delivery after a same-PID replacement is
+    # selected for routing.
+    # Expect: Only the old incarnation's waiter fails; the replacement remains routable
+    # and receives its own response.
+    # Method: Schedule old/new message UUIDs on distinct Worker doubles, install
+    # replacement routing and deliver old stop followed by the new response.
     from mlserver.parallel.messages import ModelResponseMessage
 
     responses = get_context("spawn").Queue()
@@ -321,6 +347,12 @@ async def test_delayed_old_stop_preserves_replacement_routing_and_response():
 
 
 async def test_stopped_identity_bookkeeping_expires_after_owned_work_settles():
+    # Purpose: Check that completed request and revocation bookkeeping does not
+    # permanently retain old worker identities.
+    # Expect: Weak worker records disappear after settled requests and the last strong
+    # reference are released.
+    # Method: Cycle 100 Worker doubles through response completion and stop, collect
+    # them and inspect weak references plus response/socket maps.
     pytest.importorskip("zmq")
     from mlserver.parallel.dispatcher import AsyncResponses
     from mlserver.parallel.messages import ModelResponseMessage
@@ -354,6 +386,12 @@ async def test_stopped_identity_bookkeeping_expires_after_owned_work_settles():
 
 @pytest.mark.parametrize("failure", ["close", "receiver"])
 async def test_queued_cross_loop_send_observes_transport_failure(monkeypatch, failure):
+    # Purpose: Exercise transport close or receive failure before a queued foreign-loop
+    # send takes its first step.
+    # Expect: The caller receives the transport error, not cancellation, and queued
+    # sends, response waiters and caller threads settle.
+    # Method: Intercept forwarding to finish real close or inject a malformed native
+    # reply before send begins; inspect completion and captured loop errors.
     zmq = pytest.importorskip("zmq")
     from mlserver.parallel.zmq import create_endpoint
 
@@ -456,6 +494,12 @@ async def test_queued_cross_loop_send_observes_transport_failure(monkeypatch, fa
 async def test_real_sigchld_invalidates_the_selected_worker_instance(
     settings, sum_model, monkeypatch
 ):
+    # Purpose: Check integration between real child death and transport incarnation
+    # revocation.
+    # Expect: The installed reaper passes the exact Worker and confirmed status into
+    # invalidation, and replacement serving succeeds.
+    # Method: Observe forget_worker on a real one-worker ZeroMQ registry, kill the
+    # selected child and await replacement routing before querying worker metadata.
     pytest.importorskip("zmq")
     from mlserver.parallel.registry import InferencePoolRegistry
 
@@ -491,6 +535,12 @@ async def test_real_sigchld_invalidates_the_selected_worker_instance(
 async def test_failed_queue_retirement_cannot_swallow_replacement_exit(
     settings, monkeypatch
 ):
+    # Purpose: Exercise same-PID replacement exit while an older incarnation remains
+    # retained for failed queue cleanup.
+    # Expect: The replacement's exit status and revocation cannot be consumed as another
+    # notification for the old cleanup owner.
+    # Method: Use two Worker doubles with one numeric PID, fail old retirement, install
+    # replacement routing and deliver its distinct exit status.
     from mlserver.parallel.pool import InferencePool
 
     settings.parallel_workers = 0
@@ -527,6 +577,12 @@ async def test_failed_queue_retirement_cannot_swallow_replacement_exit(
 async def test_revocation_cleanup_failure_still_confirms_all_native_exits(
     settings, monkeypatch
 ):
+    # Purpose: Exercise explicit pool close with a request-socket revocation error for
+    # one of two real workers.
+    # Expect: Independent child/queue cleanup continues for both workers, routing ends
+    # and repeated close preserves the initiating error.
+    # Method: Wrap real forget_worker to raise once after revocation, close the pool and
+    # inspect actual exit codes, queue endpoints/feeders and the repeated result.
     pytest.importorskip("zmq")
     from mlserver.parallel.pool import InferencePool
     from .test_startup_ownership import assert_retired
@@ -566,6 +622,12 @@ async def test_revocation_cleanup_failure_still_confirms_all_native_exits(
 
 
 async def test_response_group_survives_foreign_schedule_during_last_cleanup():
+    # Purpose: Exercise foreign-loop response registration while cleanup observes the
+    # previous worker group as empty.
+    # Expect: A subsequent stop still finds and fails the newly registered response
+    # without stranding its caller thread.
+    # Method: Use an instrumented set and thread events to force scheduling across the
+    # empty observation, then report stop and inspect completion on the caller loop.
     from mlserver.parallel.dispatcher import AsyncResponses
     from mlserver.parallel.messages import ModelResponseMessage
 

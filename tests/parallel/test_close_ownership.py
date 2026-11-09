@@ -9,6 +9,12 @@ from mlserver.parallel.errors import InferencePoolUnavailable
 async def test_cancelled_pool_close_is_joinable(
     inference_pool, sum_model, monkeypatch, during_cleanup
 ):
+    # Purpose: Exercise close-waiter cancellation while the pool waits for its lock or
+    # native cleanup.
+    # Expect: A repeated caller joins retained cleanup, releases workers and observes
+    # rejection of new loads.
+    # Method: Hold the operation lock or an event in worker cleanup, cancel only the
+    # public waiter, then unblock and await a second close.
     pool = inference_pool
     entered, release = asyncio.Event(), asyncio.Event()
     if during_cleanup:
@@ -54,6 +60,11 @@ async def test_cancelled_pool_close_is_joinable(
 
 
 async def test_cancelled_registry_close_is_joinable(inference_pool_registry):
+    # Purpose: Exercise registry close cancellation while a pool-key lock is held.
+    # Expect: The next close caller must finish the same cleanup rather than see false
+    # success from a closing flag.
+    # Method: Hold the default-key lock, cancel the first waiter, release the lock and
+    # check that the second closes the actual pool workers.
     registry = inference_pool_registry
     pool = registry._default_pool
     lock = registry._operation_locks.setdefault(None, asyncio.Lock())
@@ -82,6 +93,11 @@ async def test_cancelled_registry_close_is_joinable(inference_pool_registry):
 async def test_repeated_registry_close_reports_same_cleanup_failure(
     settings, monkeypatch
 ):
+    # Purpose: Exercise a cleanup error after native worker cleanup has completed.
+    # Expect: Repeated close raises the same recorded error and retains the failed pool
+    # owner.
+    # Method: Inject an error after the original worker cleanup in a zero-worker pool
+    # and compare both public close outcomes and retained inventory.
     from mlserver.parallel.registry import InferencePoolRegistry
 
     settings.parallel_workers = 0
@@ -106,6 +122,12 @@ async def test_repeated_registry_close_reports_same_cleanup_failure(
 
 
 async def test_reaped_worker_exit_remains_observable(inference_pool):
+    # Purpose: Exercise exit status delivered by an external reaper instead of
+    # Process.join.
+    # Expect: The Worker must expose the confirmed exit and its retained parent
+    # resources must remain retireable.
+    # Method: Kill a real child, consume waitpid, deliver that status to the pool and
+    # check exitcode, liveness and final close ownership.
     import os
 
     pool = inference_pool
@@ -122,6 +144,11 @@ async def test_reaped_worker_exit_remains_observable(inference_pool):
 async def test_registry_close_retains_worker_stop_cleanup(
     inference_pool_registry, monkeypatch
 ):
+    # Purpose: Exercise shutdown while a real worker-stop hook remains unfinished.
+    # Expect: Cancelling the close waiter must not drop stop-handler ownership or skip
+    # pool cleanup.
+    # Method: Kill a child, block its hook with events, cancel the public close waiter,
+    # then release the hook and join a repeated close.
     registry = inference_pool_registry
     pool = registry._default_pool
     entered, release, pool_closed = asyncio.Event(), asyncio.Event(), asyncio.Event()

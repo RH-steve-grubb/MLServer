@@ -261,8 +261,17 @@ async def socket_probe(case, directory, status):
 )
 @pytest.mark.parametrize("mode", ["success", "transient", "persistent"])
 def test_socket_setup_retains_release_ownership(owner, boundary, mode, tmp_path):
-    policy = os.environ.get("W0_SOCKET_PROBE_POLICY", "asyncio")
-    folder = Path(os.environ.get("W0_SOCKET_EVIDENCE", str(tmp_path)))
+    # Purpose: Exercise parent/worker socket options or connect failure with successful,
+    # transiently failed or persistently failed rollback.
+    # Expect: Incomplete native sockets remain owned outside usable routing;
+    # primary/cleanup errors survive, retry is isolated and close releases resources or
+    # returns an owned error.
+    # Method: Run real contexts/sockets in a disposable subprocess, verify its loop
+    # policy and recorded native state, and supervise close externally because a blocked
+    # Context.term prevents asyncio watchdogs from running. Only test-owned children are
+    # killed on failure.
+    policy = os.environ.get("MLSERVER_TEST_SOCKET_LOOP_POLICY", "asyncio")
+    folder = Path(os.environ.get("MLSERVER_TEST_SOCKET_EVIDENCE", str(tmp_path)))
     folder.mkdir(parents=True, exist_ok=True)
     stem = f"{policy}-{owner}-{boundary}-{mode}"
     status, log = folder / (stem + ".json"), folder / (stem + ".log")
@@ -313,7 +322,7 @@ def test_socket_setup_retains_release_ownership(owner, boundary, mode, tmp_path)
 
 if __name__ == "__main__":
     sys.path.insert(0, str(Path.cwd()))
-    if os.environ.get("W0_SOCKET_PROBE_POLICY") == "uvloop":
+    if os.environ.get("MLSERVER_TEST_SOCKET_LOOP_POLICY") == "uvloop":
         import uvloop
 
         uvloop.install()

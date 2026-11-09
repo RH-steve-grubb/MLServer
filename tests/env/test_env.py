@@ -96,6 +96,10 @@ def test_activate_env(env: Environment):
 
 @pytest.mark.parametrize("delete_env", [True, False])
 def test_close_revokes_stale_directory_deletion(tmp_path, delete_env):
+    # Purpose: Exercise owned and borrowed environment release across path reuse.
+    # Expect: An old environment object must never delete a later owner's files.
+    # Method: Close twice, recreate a marker at the same path, then collect the old
+    # object and verify the marker survives.
     path = tmp_path / "environment"
     path.mkdir()
     env = Environment(str(path), "owned", delete_env=delete_env)
@@ -110,6 +114,10 @@ def test_close_revokes_stale_directory_deletion(tmp_path, delete_env):
 
 
 def test_failed_close_retains_directory_owner(tmp_path, monkeypatch):
+    # Purpose: Exercise an environment directory removal that fails once.
+    # Expect: The directory and deletion authority must survive for a successful retry.
+    # Method: Inject rmtree failure, restore it, then close again and check the real
+    # directory disappears.
     path = tmp_path / "environment"
     path.mkdir()
     env = Environment(str(path), "owned")
@@ -127,6 +135,11 @@ def test_failed_close_retains_directory_owner(tmp_path, monkeypatch):
 
 
 def test_worker_copy_cannot_release_parent_environment(tmp_path):
+    # Purpose: Check that copying an environment into a worker does not transfer
+    # deletion authority.
+    # Expect: A different process must leave the parent's directory intact.
+    # Method: Change the recorded owner PID, attempt close, then restore the real owner
+    # and verify release.
     path = tmp_path / "environment"
     path.mkdir()
     env = Environment(str(path), "owned")
@@ -139,6 +152,11 @@ def test_worker_copy_cannot_release_parent_environment(tmp_path):
 
 
 def test_missing_child_during_release_keeps_directory_owned(tmp_path, monkeypatch):
+    # Purpose: Distinguish a missing nested entry from an already released environment
+    # root.
+    # Expect: An incomplete removal must report failure and retain authority to retry.
+    # Method: Make rmtree raise FileNotFoundError while the root exists, then restore it
+    # and verify a second close removes the root.
     path = tmp_path / "environment"
     path.mkdir()
     env = Environment(str(path), "owned")

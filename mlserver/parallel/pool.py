@@ -128,12 +128,16 @@ class InferencePool:
         self._env = env
         self._pool_gid = pool_gid
         self._workers: dict[int, Worker] = {}
+        # Acquisition owners are distinct from registered/routable workers.
+        # Close and SIGCHLD must see them before dispatch can safely use them.
         self._starting_workers: dict[int, Worker] = {}
         self._unstarted_workers: set[Worker] = set()
         self._start_task: asyncio.Task | None = None
         self._started = False
         self._initialization_error: BaseException | None = None
         self._cleanup_error: BaseException | None = None
+        # Replay holds committed configuration. Staged/pending replacements
+        # also own resources, so this inventory alone cannot decide pool lifetime.
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False

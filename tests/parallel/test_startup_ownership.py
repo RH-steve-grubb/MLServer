@@ -38,6 +38,13 @@ def assert_retired(worker):
 async def test_exit_before_registration_remains_owned(
     settings, monkeypatch, exit_mode, observation
 ):
+    # Purpose: Exercise the defensive interval between native spawn and dispatcher
+    # registration.
+    # Expect: Killed or gracefully stopped children retain exit status and parent-
+    # resource cleanup, including when close or timeout overlaps registration.
+    # Method: Hold the registration lock, observe a real replacement, then use explicit
+    # exit observation or the installed SIGCHLD reaper and inspect routing/queue
+    # retirement. Normal callers do not prolong this interval.
     pools = InferencePoolRegistry(settings) if observation != "known-close" else None
     pool = pools._default_pool if pools is not None else InferencePool(settings)
     await (pools or pool).start()
@@ -135,6 +142,12 @@ async def test_exit_before_registration_remains_owned(
 async def test_ordinary_early_exit_restores_committed_model(
     settings, sum_model_settings, monkeypatch, inference_request
 ):
+    # Purpose: Exercise a replacement child dying during ordinary startup without an
+    # artificial registration wait.
+    # Expect: The normal reaper/restart path retires the dead candidate and restores
+    # actual committed model serving.
+    # Method: Kill the first replacement immediately after real spawn, let production
+    # handlers create the next one, then query every worker and run prediction.
     pools = InferencePoolRegistry(settings)
     await pools.start()
     pool = pools._default_pool
@@ -188,6 +201,13 @@ async def test_ordinary_early_exit_restores_committed_model(
 async def test_simultaneous_loss_during_staging_keeps_restart_owners(
     settings, sum_model_settings, monkeypatch, close_instead
 ):
+    # Purpose: Exercise loss of all workers while a frontend candidate is staged beyond
+    # the initialization budget.
+    # Expect: Both replacement obligations survive until publication, or close joins
+    # them without late worker creation.
+    # Method: Hold a later hook with events, kill both real children and observe two
+    # restart owners before releasing preparation or closing; inspect each restored
+    # worker.
     settings.parallel_workers = 2
     settings.model_operation_timeout = 15
     pool = InferencePool(settings)

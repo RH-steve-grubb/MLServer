@@ -47,6 +47,13 @@ async def test_tarball_reuse_survives_old_frontend_collection_and_restart(
     development_mode,
     inference_request,
 ):
+    # Purpose: Exercise repeated extraction at the same environment path while old
+    # frontend references are collected.
+    # Expect: Stale deletion authority cannot remove the current interpreter; real
+    # replacement workers still replay and serve correctly.
+    # Method: Reuse a local tarball for three load/unload cycles, collect retained
+    # references, spawn replacements and check file markers, metadata, prediction and
+    # final deletion.
     settings.parallel_workers = 1
     settings.model_operation_timeout = 10
     settings.worker_start_timeout = 5
@@ -102,6 +109,12 @@ async def test_failed_pool_close_retains_files_until_successful_release(
     development_mode,
     monkeypatch,
 ):
+    # Purpose: Exercise environment-pool close whose child exit is initially
+    # unconfirmed.
+    # Expect: Files and ownership survive failed close, reuse is blocked, and successful
+    # cleanup revokes stale deletion authority before re-extraction.
+    # Method: Inject close failure with real workers alive, restore close, reload the
+    # same tarball and verify an old owner cannot delete the new serving environment.
     settings.parallel_workers = 1
     settings.model_operation_timeout = 10
     pools = InferencePoolRegistry(settings)

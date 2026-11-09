@@ -31,6 +31,14 @@ def settings(settings, request):
 async def test_close_owns_no_pid_candidate_after_failed_rollback(
     settings, sum_model_settings, monkeypatch, boundary, persistent
 ):
+    # Purpose: Exercise no-PID replacement acquisition plus failed rollback at second-
+    # queue and pre-PID start boundaries.
+    # Expect: First public close releases transient faults or records persistent owned
+    # failure, without stop/kill/join or candidate stop hooks; healthy workers still
+    # retire.
+    # Method: Fault real queue acquisition and retirement, forbid process operations on
+    # the candidate, check surviving metadata and inspect endpoints/feeders across
+    # repeated close.
     stopped = []
 
     async def on_stop(worker):
@@ -115,6 +123,13 @@ async def test_close_owns_no_pid_candidate_after_failed_rollback(
 async def test_close_takes_over_no_pid_retirement_during_rollback(
     settings, sum_model_settings, monkeypatch
 ):
+    # Purpose: Exercise defensive simultaneous close while a no-PID candidate's first
+    # rollback is suspended.
+    # Expect: Close can take ownership of parent-resource retirement without losing the
+    # primary/cleanup errors or falsely requiring process exit.
+    # Method: Hold retirement with events and force the bounded lock-drain interval,
+    # observe the second cleanup entry, then release and check real queue handles.
+    # Allocation normally does not yield.
     pool = InferencePool(settings)
     await pool.start()
     healthy = list(pool._workers.values())

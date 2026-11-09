@@ -344,6 +344,12 @@ async def test_stop_cleans_up_response_processing(responses, mocker):
 
 
 async def test_late_response_cannot_resolve_newer_request(event_loop, load_message):
+    # Purpose: Exercise a late reply for a cancelled operation alongside a newer request
+    # to the same worker.
+    # Expect: The old reply cannot resolve the newer UUID or raise an unhandled callback
+    # error.
+    # Method: Schedule two controlled futures, cancel the old one, deliver each response
+    # separately and inspect future completion plus the loop exception handler.
     from mlserver.parallel.dispatcher import AsyncResponses
 
     responses = AsyncResponses()
@@ -370,6 +376,12 @@ async def test_late_response_cannot_resolve_newer_request(event_loop, load_messa
 
 
 async def test_stopped_dispatcher_does_not_restart_failed_reader(responses, mocker):
+    # Purpose: Exercise a response-reader failure callback arriving after dispatcher
+    # shutdown begins.
+    # Expect: The callback must not restart a reader against a stopped
+    # dispatcher/executor.
+    # Method: Supply a settled failing task to the callback on an inactive dispatcher
+    # and assert its mocked start method was not called.
     dispatcher = Dispatcher({}, responses)
     start = mocker.patch.object(dispatcher, "start")
 
@@ -384,6 +396,12 @@ async def test_stopped_dispatcher_does_not_restart_failed_reader(responses, mock
 
 
 async def test_cancel_after_response_resolution_is_queued():
+    # Purpose: Exercise caller cancellation after reply handling queues completion onto
+    # the future's loop.
+    # Expect: The callback rechecks completion state and avoids InvalidStateError on the
+    # cancelled future.
+    # Method: Call resolve before cancel, yield to run the queued callback and inspect
+    # the loop's captured exception contexts.
     from mlserver.parallel.dispatcher import AsyncResponses
 
     responses = AsyncResponses()

@@ -65,6 +65,13 @@ def fail_acquisition(monkeypatch, boundary):
 async def test_automatic_failed_acquisition_retires_only_candidate(
     settings, sum_model_settings, monkeypatch, caplog, boundary, cleanup_failure
 ):
+    # Purpose: Exercise the actual SIGCHLD replacement path at partial queue and
+    # pre/post-start acquisition failures, including failed retirement.
+    # Expect: Only the candidate retires or remains cleanup-owned; a healthy sibling
+    # serves committed metadata and the existing one-attempt policy is preserved.
+    # Method: Kill one of two real workers, inject acquisition faults, wait for the
+    # restart handler's completion marker and inspect native queues, routing and
+    # recorded errors.
     registry = InferencePoolRegistry(settings)
     candidates = []
     try:
@@ -139,6 +146,12 @@ async def test_automatic_failed_acquisition_retires_only_candidate(
 async def test_accepted_replacement_rollback_survives_waiter_cancellation(
     settings, sum_model_settings, monkeypatch, interruption
 ):
+    # Purpose: Exercise cancellation after replacement rollback has confirmed child exit
+    # but is still retiring parent queues.
+    # Expect: Cancelling restart or a close waiter cannot abandon retirement, schedule
+    # another attempt or lose the surviving serving worker.
+    # Method: Hold candidate queue retirement with events, cancel the selected waiter,
+    # release it and inspect final queues, close outcome and survivor metadata.
     registry = InferencePoolRegistry(settings)
     candidates = []
     entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()

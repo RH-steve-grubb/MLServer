@@ -46,6 +46,12 @@ async def dispose(workers):
 async def test_dynamic_activation_failure_releases_children(
     settings, sum_model, monkeypatch, failure
 ):
+    # Purpose: Exercise dynamic pool creation failing at dispatcher setup, worker
+    # construction or first/later/post-start acquisition.
+    # Expect: Acquired children and parent queues retire, the failed key becomes
+    # reusable, and unrelated frontend metadata remains accessible.
+    # Method: Warm a control pool, inject each native acquisition boundary through
+    # registry.load_model, inspect acquired workers, then restore the fault and retry.
     registry = InferencePoolRegistry(settings)
     workers = []
     original = Worker.start
@@ -101,6 +107,12 @@ async def test_dynamic_activation_failure_releases_children(
 async def test_server_start_owns_default_pool_acquisition_failure(
     settings, monkeypatch, prometheus_registry
 ):
+    # Purpose: Exercise normal server startup when Worker.start exposes a child and then
+    # raises.
+    # Expect: Startup reports failure without leaving live server tasks, child processes
+    # or parent queues.
+    # Method: Fault the real default-worker start after spawn, invoke server.start and
+    # inspect liveness, task inventory and each child's retired endpoints.
     from mlserver.server import MLServer
 
     original = Worker.start
@@ -132,6 +144,12 @@ async def test_server_start_owns_default_pool_acquisition_failure(
 async def test_default_activation_failure_is_owned_and_retryable(
     settings, monkeypatch, boundary
 ):
+    # Purpose: Exercise default-registry activation failing during directory, signal-
+    # handler or worker setup.
+    # Expect: The primary error survives, previous SIGCHLD handling is preserved,
+    # resources retire and a subsequent start succeeds.
+    # Method: Inject each setup boundary, inspect real acquired children and registry
+    # owners, then remove the fault and verify ready-worker capacity.
     import signal
     from mlserver.parallel import registry as registry_module
 
@@ -180,6 +198,12 @@ async def test_default_activation_failure_is_owned_and_retryable(
 async def test_owned_activation_cannot_publish_after_close(
     settings, sum_model, monkeypatch, outcome
 ):
+    # Purpose: Exercise cancellation, deadline and concurrent pool close after
+    # activation acquires real workers.
+    # Expect: Accepted caller cancellation defers to completion; timeout or close cannot
+    # publish a late usable pool.
+    # Method: Hold activation with events, trigger the selected outcome, then inspect
+    # the returned error/result, routing eligibility and confirmed native retirement.
     registry = InferencePoolRegistry(settings)
     await registry.load_model(sum_model)
     original = InferencePool._activate
@@ -236,6 +260,12 @@ async def test_owned_activation_cannot_publish_after_close(
 async def test_failed_rollback_retains_owner_and_receives_reaped_exit(
     settings, sum_model, monkeypatch
 ):
+    # Purpose: Combine post-start failure with cleanup that cannot initially stop its
+    # live child.
+    # Expect: The failed pool/key, primary and cleanup errors, and endpoint ownership
+    # remain reachable; its owner still receives SIGCHLD status.
+    # Method: Disable stop/kill during rollback, check repeated close and blocked reuse,
+    # then restore kill and let the production reaper report exit without joining first.
     registry = InferencePoolRegistry(settings)
     await registry.load_model(sum_model)
     original_start, original_kill = Worker.start, Worker.kill
@@ -293,6 +323,12 @@ async def test_failed_rollback_retains_owner_and_receives_reaped_exit(
 async def test_parent_transport_setup_failure_has_a_cleanup_owner(
     settings, sum_model, monkeypatch, boundary
 ):
+    # Purpose: Exercise context, socket-helper and bind failure during dynamic ZeroMQ
+    # pool activation.
+    # Expect: Any returned context closes and confirmed rollback releases the failed
+    # pool key.
+    # Method: Warm the default pool, fault transport setup only for a new named pool,
+    # then inspect actual context state and registry ownership.
     if settings.parallel_inference_transport != "zmq":
         pytest.skip("ZeroMQ acquisition boundary")
     from mlserver.parallel import zmq as transport
@@ -347,6 +383,12 @@ async def test_failed_environment_pool_activation_releases_only_owned_files(
     monkeypatch,
     borrowed,
 ):
+    # Purpose: Exercise an environment-backed worker start that exposes a child before
+    # failing.
+    # Expect: Rollback retires the child and queues, deletes extracted files and
+    # preserves a borrowed environment.
+    # Method: Use the existing local tarball/development-mode fixtures or sys.prefix,
+    # fault real Worker.start and inspect directory existence and native retirement.
     registry = InferencePoolRegistry(settings)
     await registry.load_model(sum_model)
     original = Worker.start
@@ -381,6 +423,11 @@ async def test_failed_environment_pool_activation_releases_only_owned_files(
 async def test_transport_close_failure_still_joins_response_reader(
     settings, monkeypatch
 ):
+    # Purpose: Exercise transport close error after socket cleanup during pool shutdown.
+    # Expect: Independent response-reader/thread cleanup still finishes and repeated
+    # public close reports the same error.
+    # Method: Wrap the actual ZeroMQ close to raise afterward, close the pool and
+    # inspect response tasks, executor threads and worker ownership.
     if settings.parallel_inference_transport != "zmq":
         pytest.skip("ZeroMQ transport cleanup boundary")
     pool = InferencePool(settings)
@@ -412,6 +459,12 @@ async def test_transport_close_failure_still_joins_response_reader(
 async def test_close_owns_extraction_before_transfer_to_a_pool(
     settings, sum_model, local_environment_tarball, development_mode, monkeypatch
 ):
+    # Purpose: Exercise registry close after extraction completes but before an
+    # environment reaches a pool owner.
+    # Expect: The load cannot publish after close and the extracted directory/task owner
+    # is released.
+    # Method: Pause the prepared-environment return with events, request close, then
+    # release the handoff and inspect both operation results and the real directory.
     registry = InferencePoolRegistry(settings)
     await registry.load_model(sum_model)
     original = registry._prepare_environment
@@ -452,6 +505,12 @@ async def test_close_owns_extraction_before_transfer_to_a_pool(
 async def test_partial_worker_queue_allocation_is_released(
     settings, sum_model, monkeypatch
 ):
+    # Purpose: Exercise worker acquisition failing after only its first parent queue
+    # exists.
+    # Expect: The returned queue's actual reader/writer endpoints close despite there
+    # being no child PID.
+    # Method: Fault the second Queue allocation during named-pool load and inspect the
+    # first native queue; finally release test-owned handles even on failure.
     from mlserver.parallel import worker as worker_module
 
     registry = InferencePoolRegistry(settings)

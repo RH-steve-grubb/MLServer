@@ -174,6 +174,8 @@ async def _defer_cancellation(
     If the operation completes during the timeout window its result is returned or
     any exception is raised. If timeout expires a ``TimeoutError`` is raised.
     """
+    # wait_for requests coroutine cancellation only. Registries/pools retain
+    # separate owners for preparation or worker updates that may outlive it.
     operation = asyncio.wait_for(operation, timeout)
     task = asyncio.ensure_future(operation)
     caller = asyncio.current_task()

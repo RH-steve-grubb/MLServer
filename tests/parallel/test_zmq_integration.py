@@ -241,6 +241,12 @@ async def test_worker_error_keeps_other_model_and_control_channel_available(
 async def test_failed_close_retains_directory_for_live_workers(
     settings: Settings, sum_model: MLModel, mocker: MockerFixture
 ) -> None:
+    # Purpose: Exercise pool close that fails before real worker cleanup begins.
+    # Expect: Repeated close reports the recorded error, removes routing and preserves
+    # endpoints still used by live children.
+    # Method: Fault the worker-cleanup phase of a real ZeroMQ pool, inspect child
+    # liveness and directory existence on both calls, then explicitly retire test-owned
+    # resources.
     settings.parallel_workers = 1
     pool = InferencePool(settings)
     await pool.start()
@@ -261,8 +267,8 @@ async def test_failed_close_retains_directory_for_live_workers(
             with pytest.raises(RuntimeError) as observed:
                 await asyncio.wait_for(pool.close(), 10)
             assert observed.value is failure
-            # W0 must preserve the performance transport's native ownership:
-            # an error does not authorize deleting live children's endpoints.
+            # A failed close does not authorize deleting endpoints still used
+            # by live children, even after they have been removed from routing.
             assert all(worker.is_alive() for worker in workers)
             assert directory.is_dir()
             assert not pool._dispatcher._ready_workers

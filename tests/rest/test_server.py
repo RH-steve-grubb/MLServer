@@ -37,6 +37,12 @@ async def test_delete_custom_handlers(rest_server: RESTServer, sum_model: SumMod
 async def test_abandoned_load_removes_custom_routes_before_native_cleanup(
     rest_server, rest_client, sum_model, monkeypatch, replacement, wrapped
 ):
+    # Purpose: Exercise fresh/replacement custom routes on direct models and wrappers
+    # when preparation is abandoned.
+    # Expect: Routes bound to the candidate disappear before native cleanup settles,
+    # while committed routes remain callable.
+    # Method: Pause preparation, let the frontend deadline expire and inspect bound
+    # route identities before releasing cleanup.
     await rest_server.delete_custom_handlers(sum_model)
     registry = MultiModelRegistry(
         on_model_load=[rest_server.add_custom_handlers],
@@ -99,6 +105,10 @@ async def test_abandoned_load_removes_custom_routes_before_native_cleanup(
 async def test_failed_custom_route_registration_removes_partial_routes(
     rest_server, rest_client, sum_model, monkeypatch
 ):
+    # Purpose: Exercise an error partway through custom REST route registration.
+    # Expect: The failed instance must leave no partially installed route behind.
+    # Method: Make route addition raise after a real registration and inspect the app
+    # routes for handlers bound to that exact instance.
     await rest_server.delete_custom_handlers(sum_model)
     partial = SumModel(sum_model.settings.model_copy(deep=True))
     original = rest_server._app.add_api_route

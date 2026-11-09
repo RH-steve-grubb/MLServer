@@ -14,6 +14,12 @@ from tests.fixtures import SumModel
 async def test_abandoned_load_never_publishes(
     sum_model_settings, monkeypatch, replacement, stage
 ):
+    # Purpose: Exercise fresh and replacement deadlines during runtime load, hooks, and
+    # wrapper substitution.
+    # Expect: Abandoned candidates must not become serving entries; an old committed
+    # instance survives and a clean retry succeeds.
+    # Method: Hold the selected preparation stage with events, await timeout, then
+    # release it and observe exact-instance cleanup and registry lookups.
     entered = asyncio.Event()
     release = asyncio.Event()
     cleaned = asyncio.Event()
@@ -88,6 +94,11 @@ async def test_abandoned_load_never_publishes(
 
 
 async def test_failed_load_cleanup_remains_owned(sum_model_settings, monkeypatch):
+    # Purpose: Combine preparation failure with failed resource cleanup.
+    # Expect: The primary cause and cleanup error must both remain observable, and retry
+    # cannot bypass the retained failure.
+    # Method: Inject separate load/unload errors on one trusted model, inspect lookup
+    # and retry outcomes, then restore unload to release the owner.
     registry = MultiModelRegistry()
     model = SumModel(sum_model_settings)
     primary = ValueError("preparation failed")
@@ -115,6 +126,11 @@ async def test_failed_load_cleanup_remains_owned(sum_model_settings, monkeypatch
 
 
 async def test_unload_timeout_retains_cleanup(sum_model_settings, monkeypatch):
+    # Purpose: Exercise a caller deadline while model unload is still running.
+    # Expect: Serving eligibility disappears immediately, but a later unload joins the
+    # one retained cleanup instead of running it twice.
+    # Method: Pause unload with events, let its waiter time out, start a second waiter
+    # and release the original cleanup; count unload calls.
     registry = MultiModelRegistry(model_operation_timeout=0.05)
     model = await registry.load(sum_model_settings)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -145,6 +161,11 @@ async def test_unload_timeout_retains_cleanup(sum_model_settings, monkeypatch):
 
 
 async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeypatch):
+    # Purpose: Exercise retry while an abandoned candidate is still preparing.
+    # Expect: The retry must wait for settlement and cleanup, then publish a distinct
+    # ready instance.
+    # Method: Hold the first load beyond its deadline, start retry with a larger budget,
+    # release the barrier and compare model identities and cleanup events.
     registry = MultiModelRegistry(model_operation_timeout=0.05)
     entered, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
     abandoned = SumModel(sum_model_settings)
@@ -189,6 +210,11 @@ async def test_retry_waits_for_abandoned_preparation(sum_model_settings, monkeyp
 async def test_postcommit_cleanup_failure_keeps_replacement(
     sum_model_settings, monkeypatch
 ):
+    # Purpose: Exercise old-instance cleanup failure after replacement publication.
+    # Expect: The replacement remains the selected ready model even though load reports
+    # cleanup failure.
+    # Method: Make the old model's unload raise, reload the same public identity and
+    # inspect the committed lookup before restoring cleanup.
     registry = MultiModelRegistry()
     old = await registry.load(sum_model_settings)
 
@@ -208,6 +234,11 @@ async def test_postcommit_cleanup_failure_keeps_replacement(
 async def test_failed_replacement_cannot_mutate_committed_settings(
     sum_model_settings,
 ):
+    # Purpose: Check settings ownership during a replacement hook failure.
+    # Expect: Mutating the candidate must not change the committed instance or its
+    # configuration.
+    # Method: Pass the old settings into reload, mutate the candidate in a rejecting
+    # hook and compare the original settings snapshot and lookup identity.
     registry = MultiModelRegistry()
     old = await registry.load(sum_model_settings)
     original = old.settings.model_dump()
@@ -227,6 +258,11 @@ async def test_failed_replacement_cannot_mutate_committed_settings(
 async def test_failure_preserves_unrelated_names_versions_and_default(
     sum_model_settings, monkeypatch
 ):
+    # Purpose: Check lookup isolation while one version's replacement times out.
+    # Expect: Healthy versions, the unversioned default and another name retain their
+    # exact committed instances and readiness.
+    # Method: Load those controls, block replacement preparation with events and query
+    # each lookup after its deadline.
     registry = MultiModelRegistry(model_operation_timeout=0.05)
     versions = []
     for version in ["1", "2", None]:
@@ -266,6 +302,11 @@ async def test_failure_preserves_unrelated_names_versions_and_default(
 async def test_interrupted_cleanup_does_not_cancel_native_preparation(
     sum_model_settings, monkeypatch
 ):
+    # Purpose: Exercise cancellation of a cleanup owner while preparation runs in a real
+    # thread.
+    # Expect: A later cleanup must join native completion before unloading the model.
+    # Method: Block to_thread work with a threading event, cancel its cleanup task,
+    # start explicit unload and verify unload follows the thread's finished marker.
     import threading
 
     registry = MultiModelRegistry(model_operation_timeout=0.05)
@@ -321,6 +362,12 @@ async def test_interrupted_cleanup_does_not_cancel_native_preparation(
 async def test_version_unload_waits_for_abandoned_preparation(
     sum_model_settings, monkeypatch
 ):
+    # Purpose: Exercise another version's unload while preparation under the same name
+    # remains uncertain.
+    # Expect: The healthy version stays ready until the abandoned preparation settles;
+    # unload then succeeds.
+    # Method: Hold version 1 past its deadline, time out unload of version 2, release
+    # preparation and repeat unload with a generous bound.
     registry = MultiModelRegistry(model_operation_timeout=0.05)
     healthy_settings = sum_model_settings.model_copy(deep=True)
     healthy_settings.parameters.version = "2"
@@ -364,6 +411,12 @@ async def test_version_unload_waits_for_abandoned_preparation(
 async def test_hook_version_change_keeps_instance_ownership(
     sum_model_settings, monkeypatch, replacement, wrap, outcome, target_exists
 ):
+    # Purpose: Exercise hook redirection to another version, with optional wrapping,
+    # existing targets and precommit outcomes.
+    # Expect: Failure preserves both committed identities; success publishes only the
+    # redirected candidate and retires any displaced target.
+    # Method: Use event-held preparation and explicit error/timeout/success branches,
+    # then inspect exact version/default lookups and target cleanup events.
     registry = MultiModelRegistry(model_operation_timeout=5)
     healthy_settings = sum_model_settings.model_copy(deep=True)
     healthy_settings.parameters.version = "3"
@@ -459,6 +512,12 @@ async def test_hook_version_change_keeps_instance_ownership(
 async def test_redirected_commit_owns_both_displaced_instances(
     sum_model_settings, monkeypatch, outcome
 ):
+    # Purpose: Exercise a successful redirected replacement followed by old-target
+    # cleanup failure or timeout.
+    # Expect: Both displaced instances lose eligibility and receive cleanup owners while
+    # the redirected replacement remains committed.
+    # Method: Redirect version 4 to version 2, fault or pause version 2 cleanup, and
+    # independently observe version 4 cleanup plus all resulting lookups.
     registry = MultiModelRegistry(model_operation_timeout=5)
     loaded = {}
     for version in ("2", "3", "4"):
@@ -519,6 +578,11 @@ async def test_redirected_commit_owns_both_displaced_instances(
 async def test_unload_all_attempts_every_settled_cleanup_owner(
     sum_model_settings, monkeypatch, retained_count
 ):
+    # Purpose: Combine earlier failed unloads with a later unload-all request.
+    # Expect: Every settled failed owner is retried and the healthy version is unloaded
+    # even though the overall operation still reports failure.
+    # Method: Create one or several retained failures, count retries and healthy
+    # cleanup, and inspect retained task errors before restoring release.
     registry = MultiModelRegistry()
     models = []
     attempts = {}
@@ -566,6 +630,12 @@ async def test_unload_all_attempts_every_settled_cleanup_owner(
 async def test_unload_all_waits_for_preparation_before_independent_cleanup(
     sum_model_settings, monkeypatch
 ):
+    # Purpose: Separate unfinished preparation from settled failed cleanup during
+    # unload-all.
+    # Expect: Uncertain preparation blocks independent removal; after settlement, a
+    # retained cleanup error must not skip healthy cleanup.
+    # Method: Hold a failed candidate's load with events, time out unload-all, then
+    # release it and verify both cleanup attempts on the next call.
     registry = MultiModelRegistry(model_operation_timeout=5)
     settings = sum_model_settings.model_copy(deep=True)
     settings.parameters.version = "2"
@@ -627,6 +697,12 @@ async def test_unload_all_waits_for_preparation_before_independent_cleanup(
 async def test_interrupted_unload_all_owns_every_selected_instance(
     sum_model_settings, monkeypatch
 ):
+    # Purpose: Exercise interruption after bulk removal selects instances but before
+    # child unload coroutines start.
+    # Expect: Every selected version must still be retired and cleaned by an independent
+    # owner.
+    # Method: Cancel the accepted task at the selection boundary, then await per-
+    # instance cleanup markers and verify no models remain visible.
     registry = MultiModelRegistry()
     models = []
     cleaned = []

@@ -17,6 +17,12 @@ from tests.fixtures import SumModel
 
 
 async def test_failed_retirement_remains_retryable(monkeypatch):
+    # Purpose: Exercise partial parent-queue retirement failure with a supplied
+    # confirmed-exit state.
+    # Expect: Independent handles close, the failed handle remains owned and a retry
+    # completes native endpoint release idempotently.
+    # Method: Use real spawn-context queues with a lightweight owner, fault one writer
+    # close, restore it and inspect actual readers/writers; this is not reaper proof.
     # Unit-level ownership with actual parent pipe endpoints and a supplied
     # confirmed-exit state. Process/reaper behavior is covered by native tests.
     queues = [get_context("spawn").Queue(), get_context("spawn").Queue()]
@@ -61,6 +67,12 @@ async def test_failed_retirement_remains_retryable(monkeypatch):
 async def test_retirement_does_not_race_feeder_connection_close(
     settings, sum_model_settings, monkeypatch
 ):
+    # Purpose: Exercise competing feeder and retirement closure of one native parent
+    # reader.
+    # Expect: Exactly one native descriptor close occurs and the feeder terminates after
+    # retirement.
+    # Method: Pause inside actual descriptor cleanup after a real child exits, observe
+    # the competing lock attempt, then release and count native close calls.
     from mlserver.parallel import worker as worker_module
 
     # Observe both contenders before either can win native descriptor cleanup.
@@ -144,6 +156,12 @@ async def block_worker(model):
 async def test_close_settles_writers_after_blocked_worker_exit(
     settings, sum_model_settings, tmp_path
 ):
+    # Purpose: Exercise shutdown with a real pipe writer backpressured behind a child
+    # blocked like native preparation.
+    # Expect: Bounded shutdown confirms child exit and terminates the obsolete parent
+    # feeder instead of leaving interpreter-exit cleanup blocked.
+    # Method: Use a file entry marker and a frame larger than pipe capacity, establish
+    # writer entry by reader readability, then close and inspect exit/feeder state.
     settings.parallel_workers = 1
     settings.parallel_workers_timeout = 1
     settings.model_operation_timeout = 10

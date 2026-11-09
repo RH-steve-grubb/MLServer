@@ -181,6 +181,12 @@ async def test_close_is_terminal(inference_pool: InferencePool, sum_model: MLMod
 async def test_close_clears_tracking_when_worker_cleanup_fails(
     settings: Settings, sum_model: MLModel, mocker
 ):
+    # Purpose: Exercise an error raised after real worker cleanup has already finished.
+    # Expect: Terminal close clears replay/replacement state while preserving its
+    # recorded error for repeated callers.
+    # Method: Populate both inventories, wrap successful native cleanup to raise
+    # afterward and check empty model tracking, retired workers and the second close
+    # result.
     inference_pool = InferencePool(settings)
     await inference_pool.start()
     inference_pool._worker_registry.add(sum_model.settings)
