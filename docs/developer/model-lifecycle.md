@@ -297,6 +297,16 @@ remain weakly held so a concurrent schedule cannot lose its group during cleanup
 extra per-request future. No process polling, global inference lock or generation
 lease is added.
 
+Socket acquisition has an owner before setting options or connecting. A separate
+unregistered-socket inventory retains incomplete handles until native close
+succeeds; it is never used to select a socket for inference. Successful setup
+transfers ownership to the reply field or the worker's request socket entry.
+Setup failure preserves its primary exception and a secondary `cleanup_error`.
+Close attempts registered and incomplete sockets independently and enters native
+context termination only after all owned socket cleanup succeeds. Failed child
+cleanup retains its context, sockets and reply tasks on the worker until release
+or confirmed process exit, using the existing worker-failure policy.
+
 Automatic pool retirement also counts staged frontend preparation and pending
 replacements. Removing the last committed model cannot close
 a pool still needed by an accepted load. Publication, or acknowledged cleanup of

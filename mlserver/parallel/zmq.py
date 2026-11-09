@@ -35,8 +35,29 @@ def create_endpoint(directory: Path, kind: str) -> str:
     return f"ipc://{path}"
 
 
-def _socket(context: zmq.asyncio.Context, kind: int) -> Any:
+def _close_socket(sock: Any, owned: set[Any]) -> None:
+    sock.close(linger=0)
+    # Release ownership only after native close succeeds. Incomplete sockets
+    # cannot be discovered through the usable request/reply fields.
+    owned.discard(sock)
+
+
+def _close_sockets(owned: set[Any]) -> None:
+    failures: list[BaseException] = []
+    for sock in list(owned):
+        try:
+            _close_socket(sock, owned)
+        except BaseException as error:
+            failures.append(error)
+    if failures:
+        raise failures[0]
+
+
+def _socket(context: zmq.asyncio.Context, kind: int, owned: set[Any]) -> Any:
     sock = context.socket(kind)
+    # A returned native handle needs an actionable owner before configuration
+    # or its rollback can fail. Publication into usable routing happens later.
+    owned.add(sock)
     # Preserve Queue's unbounded admission policy. Resource limits and request
     # admission remain the server's responsibility, rather than an IPC change.
     try:
@@ -45,8 +66,11 @@ def _socket(context: zmq.asyncio.Context, kind: int) -> Any:
         sock.setsockopt(zmq.LINGER, 0)
         if kind == zmq.PUSH:
             sock.setsockopt(zmq.IMMEDIATE, 1)
-    except BaseException:
-        sock.close(linger=0)
+    except BaseException as primary:
+        try:
+            _close_socket(sock, owned)
+        except BaseException as cleanup:
+            setattr(primary, "cleanup_error", cleanup)
         raise
     return sock
 
@@ -57,6 +81,7 @@ class ParentTransport:
         self._context: zmq.asyncio.Context | None = None
         self._replies: Any = None
         self._requests: dict[Worker, Any] = {}
+        self._unregistered_sockets: set[Any] = set()
         self._pending_sends: dict[Worker, set[asyncio.Future[None]]] = {}
         # Queued cross-loop coroutines retain their selected Worker. Keep only
         # its small exit status here, never an exception/traceback retaining it.
@@ -80,10 +105,17 @@ class ParentTransport:
         self._loop = asyncio.get_running_loop()
         # The dispatcher retains this owner before any native acquisition.
         # A partially successful start is retired by its normal close path.
-        self._context = zmq.asyncio.Context(io_threads=1)
-        self._replies = _socket(self._context, zmq.PULL)
-        self._replies.bind(self._reply_endpoint)
-        self._receiver = asyncio.create_task(self._receive(resolve, failed))
+        try:
+            self._context = zmq.asyncio.Context(io_threads=1)
+            self._replies = _socket(self._context, zmq.PULL, self._unregistered_sockets)
+            self._unregistered_sockets.discard(self._replies)
+            self._replies.bind(self._reply_endpoint)
+            self._receiver = asyncio.create_task(self._receive(resolve, failed))
+        except BaseException as error:
+            # A partial start must close through this owner, not overwrite its
+            # context on another start while earlier sockets remain unreleased.
+            self._failure = error
+            raise
 
     async def _receive(
         self,
@@ -156,13 +188,17 @@ class ParentTransport:
             raise ValueError("ZeroMQ inference requires a started worker")
         if worker not in self._requests:
             assert self._context is not None
-            sock = _socket(self._context, zmq.PUSH)
+            sock = _socket(self._context, zmq.PUSH, self._unregistered_sockets)
             try:
                 sock.connect(getattr(worker, "_zmq_request_endpoint"))
-            except BaseException:
-                sock.close()
+            except BaseException as primary:
+                try:
+                    _close_socket(sock, self._unregistered_sockets)
+                except BaseException as cleanup:
+                    setattr(primary, "cleanup_error", cleanup)
                 raise
             self._requests[worker] = sock
+            self._unregistered_sockets.discard(sock)
         # Use multiprocessing.Queue's exact default serializer/protocol,
         # including the existing Pydantic and NumPy pickle reducers.
         sending = self._requests[worker].send(ForkingPickler.dumps(message), copy=True)
@@ -265,9 +301,14 @@ class ParentTransport:
                 self._replies.close()
         except (Exception, asyncio.CancelledError) as error:
             failures.append(error)
+        try:
+            _close_sockets(self._unregistered_sockets)
+        except BaseException as error:
+            failures.append(error)
         if self._receiver is not None:
             await asyncio.gather(self._receiver, return_exceptions=True)
         if failures:
+            # Include sockets whose setup never reached a usable field.
             # term() can block with an unclosed socket. Retain that context
             # and its failure rather than blocking the loop or claiming release.
             raise failures[0]
@@ -288,8 +329,13 @@ async def serve_requests(worker: Worker) -> None:
     requests: Any = None
     replies: Any = None
     pending: set[asyncio.Task] = set()
+    owned: set[Any] = set()
+    # Child-only native resources never cross spawn. A failed cleanup remains
+    # owned by the worker until release or its parent's confirmed process exit.
+    worker._zmq_resources = (context, owned, pending)
     failure = asyncio.get_running_loop().create_future()
     incoming: Any = None
+    primary: BaseException | None = None
 
     def completed(task: asyncio.Task) -> None:
         pending.discard(task)
@@ -299,8 +345,8 @@ async def serve_requests(worker: Worker) -> None:
                 failure.set_exception(error)
 
     try:
-        requests = _socket(context, zmq.PULL)
-        replies = _socket(context, zmq.PUSH)
+        requests = _socket(context, zmq.PULL, owned)
+        replies = _socket(context, zmq.PUSH, owned)
         requests.bind(getattr(worker, "_zmq_request_endpoint"))
         replies.connect(getattr(worker, "_zmq_reply_endpoint"))
         while True:
@@ -319,6 +365,9 @@ async def serve_requests(worker: Worker) -> None:
             pending.add(task)
             task.add_done_callback(completed)
             await asyncio.sleep(0)
+    except BaseException as error:
+        primary = error
+        raise
     finally:
         if incoming is not None:
             incoming.cancel()
@@ -326,13 +375,22 @@ async def serve_requests(worker: Worker) -> None:
             task.cancel()
         # _process_request may turn cancellation into an error response.
         # Closing first prevents that reply from waiting for a missing peer.
-        if requests is not None:
-            requests.close()
-        if replies is not None:
-            replies.close()
-        await asyncio.gather(*pending, return_exceptions=True)
         if failure.done() and not failure.cancelled():
             failure.exception()
         else:
             failure.cancel()
-        context.term()
+        try:
+            _close_sockets(owned)
+            await asyncio.gather(*pending, return_exceptions=True)
+            # Do not enter blocking termination with an unreleased handle.
+            # A failure here is also cleanup, not a replacement setup error.
+            context.term()
+        except BaseException as cleanup:
+            logger.error(
+                "Worker socket cleanup failed; resources remain owned", exc_info=True
+            )
+            if primary is None:
+                raise
+            setattr(primary, "cleanup_error", cleanup)
+        else:
+            worker._zmq_resources = None

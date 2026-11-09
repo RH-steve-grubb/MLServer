@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from multiprocessing import Process, Queue
 from multiprocessing.connection import Connection
 from threading import Lock
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -70,6 +71,8 @@ class Worker(Process):
         self._responses = responses
         self._zmq_request_endpoint: str | None = None
         self._zmq_reply_endpoint: str | None = None
+        # Populated only inside the child; parent-side spawn owns no sockets.
+        self._zmq_resources: tuple[Any, set[Any], set[Task]] | None = None
         if settings.parallel_inference_transport == "zmq":
             from .zmq import create_endpoint
 

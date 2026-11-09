@@ -44,7 +44,7 @@ async def test_failed_socket_retirement_keeps_owner_and_attempts_other_sockets(
     parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
     parent.start(lambda _: None, lambda _: None)
     workers = [worker(directory, parent._reply_endpoint) for _ in range(2)]
-    sockets = [transport._socket(parent._context, zmq.PUSH) for _ in workers]
+    sockets = [transport._socket(parent._context, zmq.PUSH, set()) for _ in workers]
     parent._requests.update(zip(workers, sockets))
     cleanup = OSError("socket release did not complete")
 
@@ -90,10 +90,10 @@ async def test_receive_failure_notifies_waiters_despite_socket_cleanup_failure(
     parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
     parent.start(lambda _: None, failures.append)
     selected = worker(directory, parent._reply_endpoint)
-    sock = transport._socket(parent._context, zmq.PUSH)
+    sock = transport._socket(parent._context, zmq.PUSH, set())
     sock.connect(selected._zmq_request_endpoint)
     parent._requests[selected] = sock
-    peer = transport._socket(parent._context, zmq.PUSH)
+    peer = transport._socket(parent._context, zmq.PUSH, set())
     peer.connect(parent._reply_endpoint)
     cleanup = OSError("request socket cleanup failed")
 
@@ -569,16 +569,35 @@ async def test_parent_close_waiter_cancellation_retains_native_cleanup(directory
         await parent.close()
 
 
-async def test_worker_partial_socket_setup_is_cleaned(directory: Path) -> None:
+@pytest.mark.parametrize("term_fails", [False, True])
+async def test_worker_partial_socket_setup_is_cleaned(
+    directory: Path, term_fails
+) -> None:
     context, requests = Mock(), Mock()
+    primary = RuntimeError("socket failed")
+    cleanup = RuntimeError("context retirement failed")
+    target = worker(directory, "unused")
+    if term_fails:
+        context.term.side_effect = cleanup
+
+    def socket(context, kind, owned):
+        if kind == zmq.PULL:
+            owned.add(requests)
+            return requests
+        raise primary
+
     with patch.object(
         transport.zmq.asyncio, "Context", return_value=context
-    ), patch.object(
-        transport, "_socket", side_effect=[requests, RuntimeError("socket failed")]
-    ):
-        with pytest.raises(RuntimeError, match="socket failed"):
-            await transport.serve_requests(worker(directory, "unused"))
-    requests.close.assert_called_once()
+    ), patch.object(transport, "_socket", side_effect=socket):
+        with pytest.raises(RuntimeError) as observed:
+            await transport.serve_requests(target)
+    assert observed.value is primary
+    if term_fails:
+        assert getattr(primary, "cleanup_error") is cleanup
+        assert target._zmq_resources[0] is context
+    else:
+        assert target._zmq_resources is None
+    requests.close.assert_called_once_with(linger=0)
     context.term.assert_called_once()
 
 
@@ -587,5 +606,5 @@ def test_socket_option_failure_closes_partial_socket() -> None:
     context.socket.return_value = sock
     sock.setsockopt.side_effect = RuntimeError("option failed")
     with pytest.raises(RuntimeError, match="option failed"):
-        transport._socket(context, zmq.PUSH)
+        transport._socket(context, zmq.PUSH, set())
     sock.close.assert_called_once_with(linger=0)
