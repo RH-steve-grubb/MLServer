@@ -310,9 +310,11 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
     # failure.
     # Expect: The pool leaves the active lookup but remains in failed ownership,
     # blocking same-key loads until confirmed release.
-    # Method: Use a failing pool double, inspect active/failed inventories and retry
-    # rejection, then permit close for test teardown; this case does not prove native
-    # exit.
+    # Method: Retire the fixture's real default pool through the registry before
+    # replacing it, so SIGCHLD can still deliver each worker's exit status. Check
+    # native exit and queue retirement, then inject a failing double to inspect
+    # active/failed inventories and retry rejection. The double's cleanup failure
+    # itself does not exercise native shutdown.
     class FailingPool:
         failure = True
         name = expected_name
@@ -323,8 +325,13 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
                 raise RuntimeError("pool cleanup failed")
 
     failing_pool = cast(InferencePool, FailingPool())
-    original_default_pool = inference_pool_registry._default_pool
     if pool_id is None:
+        original_default_pool = inference_pool_registry._default_pool
+        assert original_default_pool is not None
+        original_workers = list(original_default_pool._workers.values())
+        await inference_pool_registry._close_pool()
+        assert all(worker.exitcode is not None for worker in original_workers)
+        assert all(worker.queues_retired for worker in original_workers)
         inference_pool_registry._default_pool = failing_pool
     else:
         inference_pool_registry._pools[pool_id] = failing_pool
@@ -346,8 +353,6 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
     finally:
         setattr(failing_pool, "failure", False)
         await inference_pool_registry._close_pool(pool_id)
-        if pool_id is None and original_default_pool is not None:
-            await original_default_pool.close()
 
 
 @pytest.mark.parametrize(
