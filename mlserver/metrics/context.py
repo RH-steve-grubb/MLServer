@@ -4,8 +4,8 @@ from .registry import REGISTRY
 from .errors import InvalidModelContext
 from ..context import model_name_var, model_version_var
 
-SELDON_MODEL_NAME_LABEL = "model_name"
-SELDON_MODEL_VERSION_LABEL = "model_version"
+MODEL_NAME_LABEL = "model_name"
+MODEL_VERSION_LABEL = "model_version"
 
 
 def register(name: str, description: str) -> Histogram:
@@ -21,7 +21,7 @@ def register(name: str, description: str) -> Histogram:
     return Histogram(
         name,
         description,
-        labelnames=[SELDON_MODEL_NAME_LABEL, SELDON_MODEL_VERSION_LABEL],
+        labelnames=[MODEL_NAME_LABEL, MODEL_VERSION_LABEL],
         registry=REGISTRY,
     )
 
@@ -31,8 +31,8 @@ def _get_labels_from_context() -> dict:
         model_name = model_name_var.get()
         model_version = model_version_var.get()
         return {
-            SELDON_MODEL_NAME_LABEL: model_name,
-            SELDON_MODEL_VERSION_LABEL: model_version,
+            MODEL_NAME_LABEL: model_name,
+            MODEL_VERSION_LABEL: model_version,
         }
     except LookupError:
         raise InvalidModelContext()

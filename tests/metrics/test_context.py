@@ -9,8 +9,8 @@ from mlserver.settings import ModelSettings, ModelParameters
 from mlserver.metrics.registry import MetricsRegistry
 from mlserver.metrics.errors import InvalidModelContext
 from mlserver.metrics.context import (
-    SELDON_MODEL_NAME_LABEL,
-    SELDON_MODEL_VERSION_LABEL,
+    MODEL_NAME_LABEL,
+    MODEL_VERSION_LABEL,
     register,
     log,
     _get_labels_from_context,
@@ -34,9 +34,9 @@ def sum_model_context(
         (
             "foo",
             "v1.0",
-            {SELDON_MODEL_NAME_LABEL: "foo", SELDON_MODEL_VERSION_LABEL: "v1.0"},
+            {MODEL_NAME_LABEL: "foo", MODEL_VERSION_LABEL: "v1.0"},
         ),
-        ("foo", None, {SELDON_MODEL_NAME_LABEL: "foo", SELDON_MODEL_VERSION_LABEL: ""}),
+        ("foo", None, {MODEL_NAME_LABEL: "foo", MODEL_VERSION_LABEL: ""}),
     ],
 )
 def test_model_context(name: str, version: str | None, expected: dict):
@@ -72,8 +72,8 @@ async def test_model_context_multiple():
 
     assert len(models_labels) == len(models_settings)
     for model_settings, model_labels in zip(models_settings, models_labels):
-        assert model_labels[SELDON_MODEL_NAME_LABEL] == model_settings.name
-        assert model_labels[SELDON_MODEL_VERSION_LABEL] == ""
+        assert model_labels[MODEL_NAME_LABEL] == model_settings.name
+        assert model_labels[MODEL_VERSION_LABEL] == ""
 
 
 def test_register(metrics_registry: MetricsRegistry, sum_model_context: ModelSettings):

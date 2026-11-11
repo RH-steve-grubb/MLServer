@@ -13,8 +13,7 @@ from weakref import WeakValueDictionary
 from .errors import ModelNotFound
 from .logging import logger
 from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
-from .metrics.context import SELDON_MODEL_NAME_LABEL, SELDON_MODEL_VERSION_LABEL
-
+from .metrics.context import MODEL_NAME_LABEL, MODEL_VERSION_LABEL
 from mlserver.errors import ModelLoadError, ModelUnloadError
 
 ModelInitialiser = Callable[[ModelSettings], MLModel]
@@ -88,12 +87,12 @@ class SingleModelRegistry:
             cls._ModelCleanupFailuresTotal = Counter(
                 "model_cleanup_failures_total",
                 "Total number of model cleanup failures",
-                [SELDON_MODEL_NAME_LABEL, SELDON_MODEL_VERSION_LABEL],
+                [MODEL_NAME_LABEL, MODEL_VERSION_LABEL],
             )
         cls._ModelCleanupFailuresTotal.labels(
             **{
-                SELDON_MODEL_NAME_LABEL: model_name,
-                SELDON_MODEL_VERSION_LABEL: model_version or "",
+                MODEL_NAME_LABEL: model_name,
+                MODEL_VERSION_LABEL: model_version or "",
             }
         ).inc()
 
