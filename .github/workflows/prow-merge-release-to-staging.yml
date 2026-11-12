@@ -13,7 +13,7 @@ env:
   RELEASE_BRANCH: ${{ github.ref_name }}
   TARGET_BRANCH: rhoai-staging
   PYTHON_VERSION: "3.12"
-  POETRY_VERSION: "2.1.1"
+  POETRY_VERSION: "2.5.1"
   SLACK_WEBHOOK_URL: ${{ secrets.ALERTS_MLSERVER_CHANNEL_SLACK_WEBHOOK_URL }}
 
 permissions:

@@ -322,11 +322,10 @@ as the main process. Consult the tables below for environment compatibility.
 | 🟢     | Supported    |
 | 🔵     | Untested     |
 
-| Worker Python \ Server Python | 3.10 | 3.11 | 3.12 |
-| ----------------------------- | ---- | ---- | ---- |
-| 3.10                          | 🟢   | 🟢   | 🟢   |
-| 3.11                          | 🟢   | 🟢   | 🟢   |
-| 3.12                          | 🟢   | 🟢   | 🟢   |
+| Worker Python \ Server Python | 3.11 | 3.12 |
+| ----------------------------- | ---- | ---- |
+| 3.11                          | 🟢   | 🟢   |
+| 3.12                          | 🟢   | 🟢   |
 
 If we take the [previous example](#loading-a-custom-mlserver-runtime) above as
 a reference, we could extend it to include our custom environment as:

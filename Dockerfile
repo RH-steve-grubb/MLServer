@@ -3,7 +3,7 @@ ARG RUNTIMES="lightgbm onnx sklearn xgboost"
 # Space-separated list of runtime import paths
 ARG TRUSTED_RUNTIMES="mlserver_lightgbm.LightGBMModel mlserver_onnx.OnnxModel mlserver_sklearn.SKLearnModel mlserver_xgboost.XGBoostModel"
 ARG PYTHON_VERSION=3.12
-ARG POETRY_VERSION="2.1.1"
+ARG POETRY_VERSION="2.5.1"
 
 FROM ${BASE_IMAGE} AS wheel-builder
 
@@ -95,8 +95,8 @@ RUN --mount=type=bind,from=wheel-builder,src=/opt/mlserver/dist,target=./dist \
     done && \
     rm -rf /root/.cache/pip
 
-COPY ./licenses/license.txt .
-COPY ./licenses/license.txt /licenses/
+COPY ./licenses/cpu/license.txt .
+COPY ./licenses/cpu/license.txt /licenses/
 
 # Generate trusted-runtimes.json with only installed runtimes
 RUN env TRUSTED_RUNTIMES="$TRUSTED_RUNTIMES" python3 <<'EOF'

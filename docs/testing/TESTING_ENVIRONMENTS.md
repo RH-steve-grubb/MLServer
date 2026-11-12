@@ -28,7 +28,7 @@ Both approaches create compatible tarballs that work with MLServer's `Environmen
 ### Key Features
 
 - **Flexible environment creation**: Venv or conda, your choice
-- **Multiple Python versions**: Test across Python 3.10-3.12
+- **Multiple Python versions**: Test across Python 3.11-3.12
 - **Efficient caching**: Tarballs cached in `tests/testdata/.cache/`
 - **Compatible outputs**: Both methods produce identical results
 - **No code changes needed**: Same tests work in both modes
@@ -58,7 +58,7 @@ poetry run tox -e all-runtimes-venv-zmq
 ```
 
 These run the same suites, with the same parallel/serial ordering, as their
-default counterparts. PR CI runs both venv variants across Python 3.10–3.12;
+default counterparts. PR CI runs both venv variants across Python 3.11–3.12;
 combined-runtime conda tests remain push-only. The final **Test results** job
 fails if any required job fails, is cancelled, or is skipped.
 
@@ -136,7 +136,7 @@ The `USE_CONDA` environment variable controls which environment creation method 
 |-------|-----------|-----------|-------|
 | (unset) | ✅ | ❌ | Default: venv mode |
 | `false`, `0`, `no` | ✅ | ❌ | Tests current Python version only |
-| `true`, `1`, `yes` | ❌ | ✅ | Tests all Python versions (3.10-3.12) |
+| `true`, `1`, `yes` | ❌ | ✅ | Tests all Python versions (3.11-3.12) |
 
 **Implementation**: See [tests/conftest.py:47-52](../../tests/conftest.py#L47-L52)
 
@@ -144,7 +144,7 @@ The `USE_CONDA` environment variable controls which environment creation method 
 def get_python_versions() -> list[tuple[int, int]]:
     use_conda = os.environ.get("USE_CONDA", "").lower() in ("1", "true", "yes")
     if use_conda:
-        return PYTHON_VERSIONS  # [(3,10), (3,11), (3,12)]
+        return PYTHON_VERSIONS  # [(3, 11), (3, 12)]
 
     return [(sys.version_info.major, sys.version_info.minor)]  # Current only
 ```
@@ -156,7 +156,7 @@ The four base environments select core/combined suites and venv/conda behavior:
 | Feature | `mlserver-venv` | `mlserver-conda` | `all-runtimes-venv` | `all-runtimes-conda` |
 |---------|-----------------|-------------------|---------------------|----------------------|
 | Conda usage | Disabled | Enabled | Disabled | Enabled |
-| Python versions | Current only | All (3.10-3.12) | Current only | All (3.10-3.12) |
+| Python versions | Current only | All (3.11-3.12) | Current only | All (3.11-3.12) |
 | Runtimes tested | Core only | Core only | All | All |
 | Requires | venv, pip (built-in) | conda, conda-pack | venv, pip (built-in) | conda, conda-pack |
 | Speed | Faster (pip install) | Slower (conda install) | Faster (pip install) | Slower (conda install) |
@@ -193,7 +193,7 @@ When `USE_CONDA=false` (venv mode, default):
 
 2. **Environment creation**: For each Python version:
    ```bash
-   python3.10 -m venv --copies /tmp/mlserver-<uuid>
+   python3.11 -m venv --copies /tmp/mlserver-<uuid>
    ```
 
 3. **Dependency installation**:
@@ -233,18 +233,18 @@ When `USE_CONDA=true` (or `1`, `yes`):
 
 2. **Python version injection**: The test infrastructure dynamically modifies the environment.yml to test multiple Python versions:
    - Reads the template environment.yml
-   - Replaces `python == 3.12` with requested version (e.g., `python == 3.10`)
-   - Saves as `environment-py310.yml`, `environment-py311.yml`, etc.
+   - Replaces `python == 3.12` with requested version (e.g., `python == 3.11`)
+   - Saves as `environment-py311.yml`, `environment-py312.yml`, etc.
 
 3. **Environment creation**: For each Python version:
    ```bash
-   conda env create -n mlserver-<uuid> -f environment-py310.yml
+   conda env create -n mlserver-<uuid> -f environment-py311.yml
    ```
 
 4. **Tarball packaging**:
    ```bash
    conda-pack --ignore-missing-files --exclude lib/python3.1 \
-     -n mlserver-<uuid> -o tests/testdata/.cache/environment-py310.tar.gz
+     -n mlserver-<uuid> -o tests/testdata/.cache/environment-py311.tar.gz
    ```
 
 5. **Cleanup**: Conda environment removed after packaging
@@ -252,7 +252,6 @@ When `USE_CONDA=true` (or `1`, `yes`):
 6. **Test execution**: All 17+ environment tests run against these tarballs
 
 7. **Multi-version testing**: Tests parameterized across Python versions:
-   - Python 3.10: `test_from_tarball[py310]`
    - Python 3.11: `test_from_tarball[py311]`
    - Python 3.12: `test_from_tarball[py312]`
 
@@ -274,14 +273,14 @@ tests/env/test_env.py::test_from_tarball[py311] PASSED
 When conda is enabled, tests run against all supported Python versions:
 
 ```python
-MIN_PYTHON_VERSION = (3, 10)
+MIN_PYTHON_VERSION = (3, 11)
 MAX_PYTHON_VERSION = (3, 12)
 PYTHON_VERSIONS = [
     (major, minor)
     for major in range(MIN_PYTHON_VERSION[0], MAX_PYTHON_VERSION[0] + 1)
     for minor in range(MIN_PYTHON_VERSION[1], MAX_PYTHON_VERSION[1] + 1)
 ]
-# Result: [(3, 10), (3, 11), (3, 12)]
+# Result: [(3, 11), (3, 12)]
 ```
 
 Tests are parameterized using pytest:
@@ -297,7 +296,6 @@ def env_python_version(request: pytest.FixtureRequest) -> tuple[int, int]:
 
 **Example output**:
 ```
-tests/env/test_env.py::test_from_tarball[py310] PASSED
 tests/env/test_env.py::test_from_tarball[py311] PASSED
 tests/env/test_env.py::test_from_tarball[py312] PASSED
 ```

@@ -214,11 +214,10 @@ covered by the default trusted runtimes allowlist:
 
 | Python | Status |
 |--------|--------|
-| 3.10 | Supported |
 | 3.11 | Supported |
 | 3.12 | Supported |
 
-Python 3.9 and earlier are no longer supported. Python 3.13 is not yet tested.
+Python 3.10 and earlier are no longer supported. Python 3.13 is not yet tested.
 
 ---
 

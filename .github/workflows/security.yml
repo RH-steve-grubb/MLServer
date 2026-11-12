@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Security Scan
-        uses: snyk/actions/python-3.10@master
+        uses: snyk/actions/python-3.11@master
         with:
           args: --fail-on=upgradable
             --severity-threshold=high
@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Static Code Analysis Scan
-        uses: snyk/actions/python-3.10@master
+        uses: snyk/actions/python-3.11@master
         with:
           command: code test
           args: --fail-on=upgradable

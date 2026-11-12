@@ -179,7 +179,7 @@ def _type_hints_equivalent(a: Any, b: Any) -> bool:
     (e.g. ``typing.List[str]`` vs ``list[str]``).
 
     Union/Optional cross-style pairs (typing.Union vs | syntax) are handled
-    by the == check: Python 3.10+ defines __eq__ across both Union forms.
+    by the == check: Python 3.11+ defines __eq__ across both Union forms.
     The get_origin/get_args path handles generic aliases (List vs list, etc.).
     """
     if a == b:

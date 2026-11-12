@@ -44,7 +44,7 @@ addopts = "--import-mode=importlib"
 markers = ["cuda: marks tests requiring CUDA GPU hardware (auto-skipped without GPU)"]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.13"
+python = ">=3.11,<3.13"
 click = "*"
 fastapi = ">=0.134.0,<0.137.0"
 python-dotenv = "*"
@@ -110,7 +110,7 @@ types-orjson = "3.6.2"
 types-aiofiles = "24.1.0.20250516"
 types-requests = "2.32.0.20250602"
 black = "24.8.0"
-pip-licenses = "4.4.0"
+pip-licenses = "5.5.5"
 pytest-xdist = "3.6.1"
 filelock = "^3.13.1"
 httpx-sse = ">=0.3.1,<0.5.0"

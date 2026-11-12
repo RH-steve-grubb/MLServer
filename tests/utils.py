@@ -141,7 +141,7 @@ async def _pack_with_conda(version: tuple[int, int], env_yml: str, tarball_path:
     env_name = f"mlserver-{uuid}"
     try:
         await _run(f"conda env create -n {env_name} -f {fixed_env_yml}")
-        # NOTE: We exclude Python's symlink into 3.1 for >=3.10
+        # NOTE: We exclude Python's symlink into 3.1 for >=3.11
         # See https://github.com/conda/conda-pack/issues/244#issuecomment-1361094094
         await _run(
             "conda-pack"

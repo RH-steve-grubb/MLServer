@@ -5,8 +5,8 @@ REST (FastAPI) and gRPC. ODH midstream fork of `SeldonIO/MLServer` with
 Konflux builds, runtime security hardening, and release automation.
 Poetry-only monorepo: core `mlserver` + 4 runtime packages under `runtimes/`.
 
-- **Python:** 3.10–3.12 (all branches)
-- **Package manager:** Poetry 2.1.1 (always use Poetry, never pip install directly).
+- **Python:** 3.11–3.12 (all branches)
+- **Package manager:** Poetry 2.5.1 (always use Poetry, never pip install directly).
   Poetry upgrades must be explicit, standalone changes, never incidental to
   other work.
 
@@ -41,7 +41,7 @@ Poetry-only monorepo: core `mlserver` + 4 runtime packages under `runtimes/`.
   `# type: ignore` to suppress errors — fix them or update stubs.
 - **Type annotations** expected on new public functions and methods.
 - **Tests:** `async def test_*` with `asyncio_mode = auto`; parallel via `-n auto`.
-  CI matrix: Python 3.10/3.11/3.12; all-runtimes suite runs on push only (not PR).
+  CI matrix: Python 3.11/3.12; all-runtimes suite runs on push only (not PR).
 - **CUDA tests** use `@pytest.mark.cuda` and auto-skip on CPU-only systems.
   Run with `make test-cuda` or `tox -c ./runtimes/onnx -e cuda`. CUDA tests
   run serially (no `-n auto`) to avoid GPU OOM.

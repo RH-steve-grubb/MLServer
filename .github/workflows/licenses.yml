@@ -12,13 +12,14 @@ jobs:
     if: github.repository == 'SeldonIO/MLServer' # Do not run this on forks.
     steps:
       - uses: actions/checkout@v4
-      - name: Set up Python 3.10
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
+          version: 2.5.1
           virtualenvs-create: false
       - name: Install Dependencies
         run: |
@@ -29,7 +30,8 @@ jobs:
           git \
             --no-pager diff \
             --exit-code \
-            ./licenses/license_info.no_versions.csv
+            ./licenses/cpu/license_info.no_versions.csv \
+            ./licenses/cuda/license_info.no_versions.csv
       - name: Open PR with License Changes
         if: ${{ failure() }}
         uses: peter-evans/create-pull-request@v6

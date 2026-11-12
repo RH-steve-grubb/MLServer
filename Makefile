@@ -115,9 +115,11 @@ lint-no-changes:
 lint-generate: generate lint-no-changes
 
 licenses:
-	tox --recreate -e licenses
-	cut -d, -f1,3 ./licenses/license_info.csv \
-		> ./licenses/license_info.no_versions.csv
+	tox --recreate -e licenses,licenses-cuda
+	cut -d, -f1,3 ./licenses/cpu/license_info.csv \
+		> ./licenses/cpu/license_info.no_versions.csv
+	cut -d, -f1,3 ./licenses/cuda/license_info.csv \
+		> ./licenses/cuda/license_info.no_versions.csv
 
 fmt:
 	poetry run black .

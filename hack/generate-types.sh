@@ -33,7 +33,7 @@ _generatePydantic() {
     --custom-template-dir "${ROOT_FOLDER}/hack/templates" \
     --base-class ".base.BaseModel" \
     --disable-timestamp \
-    --target-python-version 3.10 \
+    --target-python-version 3.11 \
     --use-standard-collections \
     --use-union-operator \
     --disable-future-imports

@@ -4,7 +4,7 @@ ARG RUNTIMES="onnx"
 ARG TRUSTED_RUNTIMES="mlserver_onnx.OnnxModel"
 ARG CUDA_VERSION="12-9"
 ARG PYTHON_VERSION=3.12
-ARG POETRY_VERSION="2.1.1"
+ARG POETRY_VERSION="2.5.1"
 
 FROM ${BASE_IMAGE} AS wheel-builder
 
@@ -110,8 +110,8 @@ RUN --mount=type=bind,from=wheel-builder,src=/opt/mlserver/dist,target=./dist \
     done && \
     rm -rf /root/.cache/pip
 
-COPY ./licenses/license.txt .
-COPY ./licenses/license.txt /licenses/
+COPY ./licenses/cuda/license.txt .
+COPY ./licenses/cuda/license.txt /licenses/
 
 # Generate trusted-runtimes.json with only installed runtimes
 RUN env TRUSTED_RUNTIMES="$TRUSTED_RUNTIMES" python3 <<'EOF'
