@@ -5,6 +5,9 @@ import signal
 from asyncio import Task, CancelledError
 from collections.abc import Awaitable, Callable, Sequence
 from multiprocessing import Process, Queue
+from multiprocessing.connection import Connection
+from threading import Lock
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
@@ -38,6 +41,22 @@ def _noop():
     pass
 
 
+def _serialize_connection_close(connection: Connection) -> None:
+    close = connection.close
+    lock = Lock()
+
+    def close_once() -> None:
+        # Connection.close checks and clears its descriptor around a native
+        # close which can release the GIL. The feeder and retirement owner
+        # must not both pass that check and close the same descriptor.
+        with lock:
+            close()
+
+    # Install before the feeder captures its closer. Multiprocessing's
+    # Connection reducer transfers the descriptor, not this parent-only lock.
+    setattr(connection, "close", close_once)
+
+
 class Worker(Process):
     def __init__(
         self,
@@ -52,6 +71,8 @@ class Worker(Process):
         self._responses = responses
         self._zmq_request_endpoint: str | None = None
         self._zmq_reply_endpoint: str | None = None
+        # Populated only inside the child; parent-side spawn owns no sockets.
+        self._zmq_resources: tuple[Any, set[Any], set[Task]] | None = None
         if settings.parallel_inference_transport == "zmq":
             from .zmq import create_endpoint
 
@@ -60,13 +81,31 @@ class Worker(Process):
                 raise ValueError("ZeroMQ worker requires its pool's reply endpoint")
             self._zmq_reply_endpoint = reply
             self._zmq_request_endpoint = create_endpoint(Path(reply[6:]).parent, "q")
-        self._requests: Queue[ModelRequestMessage] = Queue()
-        self._model_updates: Queue[ModelUpdateMessage] = Queue()
+        self._requests: Queue[ModelRequestMessage]
+        self._model_updates: Queue[ModelUpdateMessage]
+        self._queues: list[Queue] = []
+        self._queues_retired = False
         self._env = env
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
 
         self.__executor: ThreadPoolExecutor | None = None
+
+    def _prepare_queues(self) -> None:
+        # The pool already owns this Worker, even if the second allocation or
+        # Process.start fails. Retain each completed acquisition immediately.
+        if not self._queues:
+            self._queues.append(Queue())
+        if len(self._queues) == 1:
+            self._queues.append(Queue())
+        self._requests, self._model_updates = self._queues
+        for queue in self._queues:
+            _serialize_connection_close(getattr(queue, "_reader"))
+            setattr(queue, "_ignore_epipe", True)
+
+    def start(self) -> None:
+        self._prepare_queues()
+        super().start()
 
     @property
     def _executor(self) -> ThreadPoolExecutor:
@@ -237,8 +276,8 @@ class Worker(Process):
                 await self._model_registry.load(model_settings, True)
             elif update.update_type == ModelUpdateType.Unload:
                 try:
-                    await self._model_registry.unload_version(
-                        model_settings.name, model_settings.version, update.rollback
+                    await self._model_registry._unload_exact_version(
+                        model_settings, update.rollback
                     )
                 except ModelNotFound:
                     # Model not present on worker - idempotent operation
@@ -271,10 +310,57 @@ class Worker(Process):
         """
         self._model_updates.put(model_update)
 
+    def record_exit(self, exit_code: int) -> None:
+        """Record a child exit already confirmed by the registry's waitpid.
+
+        multiprocessing cannot poll the status again after SIGCHLD has reaped
+        the child. Preserve that confirmed status for join and close callers.
+        """
+        popen = getattr(self, "_popen", None)
+        if popen is not None:
+            popen.returncode = exit_code
+
     def close_queues(self):
         """Close this worker's parent-side queues."""
-        self._model_updates.close()
-        self._requests.close()
+        for queue in self._queues:
+            queue.close()
+
+    @property
+    def queues_retired(self) -> bool:
+        """Whether confirmed exit and parent queue retirement both completed."""
+        return self._queues_retired
+
+    async def retire_queues(self, timeout: float) -> None:
+        """Release parent-side writers only after the consumer has exited."""
+        if self._queues_retired:
+            return
+        if self.pid is not None and self.exitcode is None:
+            raise RuntimeError("Cannot retire queues before confirmed worker exit")
+        self.close_queues()
+        # Queue's public API provides neither a bounded feeder join nor a way
+        # to break a full pipe after consumer exit. Retire these CPython parent
+        # handles explicitly; native queue/race regressions guard this boundary.
+        failures = []
+        for queue in self._queues:
+            try:
+                # Queue.close() alone only queues a sentinel behind buffered
+                # data. A dead consumer cannot drain a full pipe. Closing its
+                # obsolete parent reader releases any blocked feeder write.
+                getattr(queue, "_reader").close()
+                thread = getattr(queue, "_thread", None)
+                if thread is not None:
+                    await asyncio.to_thread(thread.join, timeout)
+                    if thread.is_alive():
+                        raise RuntimeError(
+                            f"Queue writer for worker {self.pid} has not exited"
+                        )
+                getattr(queue, "_writer").close()
+            except Exception as error:
+                logger.error("Failed to retire worker queue", exc_info=True)
+                failures.append(error)
+        if failures:
+            raise failures[0]
+        self._queues_retired = True
 
     async def stop(self):
         """

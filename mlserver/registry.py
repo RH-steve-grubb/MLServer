@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextvars import ContextVar
 
 from collections.abc import Awaitable, Callable, Sequence
 from itertools import chain
@@ -8,13 +9,17 @@ from prometheus_client import Counter
 
 from .context import model_context
 from .model import MLModel
-from .utils import defer_cancellation, with_operation_lock
+from .utils import defer_cancellation, with_operation_lock, create_task_independent
 from weakref import WeakValueDictionary
 from .errors import ModelNotFound
 from .logging import logger
 from .settings import ModelSettings, DEFAULT_MODEL_OPERATION_TIMEOUT
 from .metrics.context import MODEL_NAME_LABEL, MODEL_VERSION_LABEL
 from mlserver.errors import ModelLoadError, ModelUnloadError
+
+_model_load_hooks_active: ContextVar[bool] = ContextVar(
+    "model_load_hooks_active", default=False
+)
 
 ModelInitialiser = Callable[[ModelSettings], MLModel]
 ModelRegistryHook = Callable[[MLModel], Awaitable[MLModel]]
@@ -107,6 +112,12 @@ class SingleModelRegistry:
         self._operation_lock = asyncio.Lock()
         self._versions: dict[str, MLModel] = {}
         self._pending_reload: dict[str, MLModel] = {}
+        # These are resource owners, separate from entries eligible for serving.
+        # Failed cleanup stays here until an explicit unload retries it.
+        self._cleanup_tasks: dict[MLModel, asyncio.Task] = {}
+        # Keep the dependency separately: cancelling a cleanup task must not
+        # let its retry unload resources while native preparation is still live.
+        self._cleanup_preparations: dict[MLModel, asyncio.Task] = {}
         self._default: MLModel | None = None
 
         self._name = model_settings.name
@@ -190,25 +201,52 @@ class SingleModelRegistry:
             When True, unloading the previous model is skipped — the main process
             dispatches unload to all workers separately.
         """
+        await self._drain_cleanup()
         version = _get_version(model_settings)
         previous_loaded_model = self._find_exact_version(version)
-        new_model = self._model_initialiser(model_settings)
+        # Hooks may amend preparation settings. Do not let a reused settings
+        # object mutate the configuration of the committed generation.
+        new_model = self._model_initialiser(
+            model_settings.model_copy(deep=True)
+            if previous_loaded_model is not None
+            else model_settings
+        )
 
         with model_context(model_settings):
-            # If a previous loaded model is found this is the trigger for reload
-            # Otherwise a fresh load is triggered
-            if previous_loaded_model:
-                new_model = await self._load_model(new_model, True)
-                # If this operation is being performed on a parallel worker,
-                # skip unload. The main process will dispatch an Unload message
-                # to all workers via InferencePool.unload_model, which triggers
-                # unload_version -> _unload_model on each worker.
-                if not parallel:
-                    await self._unload_model(previous_loaded_model, False)
-            else:
-                new_model = await self._load_model(new_model, False)
+            new_model = await self._load_model(
+                new_model, previous_loaded_model is not None
+            )
+            # Workers stage replacement publication until the main process
+            # dispatches the old generation's unload separately.
+            if not parallel:
+                await self._publish_model(new_model, previous_loaded_model)
 
         return new_model
+
+    async def _publish_model(self, model: MLModel, previous: MLModel | None) -> None:
+        # A hook can redirect preparation to another committed version. Both
+        # displaced instances stay owned, even if the first cleanup times out.
+        target = self._find_exact_version(model.version)
+        retired: list[MLModel] = []
+        for candidate in (previous, target):
+            if candidate is not None and candidate is not model:
+                if not any(candidate is owned for owned in retired):
+                    retired.append(candidate)
+
+        self._remove_pending(model)
+        self._unregister(model)
+        for old in retired:
+            self._unregister(old)
+            old.ready = False
+        self._refresh_default()
+        self._register(model)
+        cleanup = [self._start_cleanup(old) for old in retired]
+        results = await asyncio.gather(
+            *(asyncio.shield(task) for task in cleanup), return_exceptions=True
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _load_model(self, model: MLModel, reload: bool = False):
         model_msg = f"model '{model.name}'"
@@ -216,7 +254,12 @@ class SingleModelRegistry:
         if version:
             model_msg = f"version {model.version} of {model_msg}"
 
+        preparation = None
+        initial_model = model
+        hook_models = []
         try:
+            target = self._find_exact_version(model.version)
+            reload = reload or (target is not None and target is not model)
             if reload:
                 # For reload scenarios, the model should only be registered
                 # after it is successfully loaded to allow rollback
@@ -230,26 +273,56 @@ class SingleModelRegistry:
                 for callback in self._on_model_load:
                     # NOTE: Callbacks need to be executed sequentially to ensure that
                     # they go in the right order
-                    model = await callback(model)
+                    token = _model_load_hooks_active.set(True)
+                    try:
+                        model = await callback(model)
+                        hook_models.append(model)
+                    finally:
+                        _model_load_hooks_active.reset(token)
             finally:
                 # Register model again to ensure we save version modified by hooks
                 if reload:
                     self._pending_reload[version] = model
                 else:
-                    self._register(model)
+                    if model is not initial_model or (model.version or "") != version:
+                        self._unregister(initial_model)
+                        self._refresh_default()
+                    target = self._find_exact_version(model.version)
+                    if target is not None and target is not model:
+                        self._pending_reload[version] = model
+                    else:
+                        self._register(model)
 
-            if not await model.load():
+            # Do not cancel runtime preparation: it may own native work or a
+            # thread which asyncio cancellation cannot stop. An abandoned load
+            # is cleaned only after this exact preparation has settled.
+            preparation = asyncio.create_task(model.load())
+            if not await asyncio.shield(preparation):
                 raise ModelLoadError(f"Model load returned False for {model_msg}.")
-        except Exception as load_error:
+            for hooked in hook_models:
+                hooked._load_complete()
+        except (Exception, asyncio.CancelledError) as load_error:
+            for hooked in hook_models:
+                hooked._load_failed()
             logger.error(f"Failed to load {model_msg}. Attempting cleanup...")
             try:
-                await self._unload_model(model, reload)
-            except Exception:
+                self._discard_load(model)
+                cleanup = self._start_cleanup(model, preparation)
+                if isinstance(load_error, asyncio.CancelledError):
+                    raise
+                await asyncio.shield(cleanup)
+            except (Exception, asyncio.CancelledError) as cleanup_error:
+                if isinstance(load_error, asyncio.CancelledError):
+                    # The timeout remains the primary outcome. Cleanup is owned
+                    # by _cleanup_tasks and its failure is logged and retained.
+                    raise load_error
                 # Still raise a load error since this is a failure during
                 # load failure cleanup
-                raise ModelLoadError(
+                failure = ModelLoadError(
                     f"Model load and cleanup failed for {model_msg}"
-                ) from load_error
+                )
+                failure.cleanup_error = cleanup_error
+                raise failure from load_error
             raise
 
         logger.info(f"Loaded {model_msg} successfully.")
@@ -267,16 +340,25 @@ class SingleModelRegistry:
         metrics but the registry is always cleared, since a model that fails to
         unload cleanly is still removed from the active registry.
         """
+        retained_failures = await self._retry_cleanup()
         models = await self.get_models()
 
         # Perform all unloads concurrently and wait for results to ensure
         # state is properly maintained
         try:
+            # Transfer every selected instance to a resource owner before the
+            # next await. Cancellation can otherwise stop an unload coroutine
+            # before it starts, while the finally block removes its registration.
+            cleanup = [self._start_unload(model) for model in models]
             results = await asyncio.gather(
-                *[self._unload_model(model) for model in models],
+                *(asyncio.shield(task) for task in cleanup if task is not None),
                 return_exceptions=True,
             )
-            unload_failures = [r for r in results if isinstance(r, Exception)]
+            unload_failures = [r for r in results if isinstance(r, BaseException)]
+            if retained_failures:
+                # Report the retained cause after independent versions have
+                # also been attempted. Failed resource owners remain tracked.
+                raise retained_failures[0]
             if unload_failures:
                 raise ModelUnloadError(
                     f"Failed to unload {len(unload_failures)} version(s) of "
@@ -309,84 +391,216 @@ class SingleModelRegistry:
         updated, since a model that fails to unload cleanly is still removed
         from the active registry.
         """
-        model = await self.get_model(version)
+        await self._unload_version(version, rollback, exact=False)
+
+    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def _unload_exact_version(
+        self, version: str | None, rollback: bool = False
+    ) -> None:
+        # Worker updates already identify the frontend's selected version.
+        # An absent unversioned attempt must not select a versioned default.
+        await self._unload_version(version, rollback, exact=True)
+
+    async def _unload_version(
+        self, version: str | None, rollback: bool, exact: bool
+    ) -> None:
+        current = (
+            self._find_exact_version(version) if exact else self._find_model(version)
+        )
+        cleanup_version = current.version if current else version
+        cleanup_models = None
+        if exact or current is not None or version is not None:
+            cleanup_models = [
+                model
+                for model in self._cleanup_tasks
+                if model.version == cleanup_version
+            ]
+        await self._drain_cleanup(retry=True, models=cleanup_models)
+        if self.empty():
+            return
+        if rollback:
+            model = self._pending_reload.get(version or "")
+            if model is None:
+                return
+        elif exact:
+            model = self._find_exact_version(version)
+            if model is None:
+                return
+        else:
+            model = await self.get_model(version)
         await self._unload_model(model, rollback)
 
-    async def _unload_model(self, model: MLModel, rollback: bool = False):
+    def _remove_pending(self, model: MLModel) -> bool:
+        # A hook may return another version while the staged entry still has
+        # the original version key. Only this instance belongs to this cleanup.
+        removed = False
+        for version, pending in list(self._pending_reload.items()):
+            if pending is model:
+                del self._pending_reload[version]
+                removed = True
+        return removed
+
+    def _discard_load(self, model: MLModel) -> None:
+        self._remove_pending(model)
+        self._unregister(model)
+        model.ready = False
+
+    async def _unload_model(
+        self,
+        model: MLModel,
+        rollback: bool = False,
+        preparation: asyncio.Task | None = None,
+    ):
+        task = self._start_unload(model, rollback, preparation)
+        if task is not None:
+            await asyncio.shield(task)
+
+    def _start_unload(
+        self,
+        model: MLModel,
+        rollback: bool = False,
+        preparation: asyncio.Task | None = None,
+    ) -> asyncio.Task | None:
+        version = _get_version(model.settings) or ""
+        pending = self._pending_reload.get(version)
+        if rollback:
+            if not self._remove_pending(model):
+                return None
+        elif pending is not None and pending is not model and pending.ready:
+            # Publication precedes old-generation cleanup. A cleanup failure
+            # must never roll back this successfully prepared replacement.
+            del self._pending_reload[version]
+            self._unregister(model)
+            self._refresh_default()
+            self._register(pending)
+        else:
+            self._unregister(model)
+        model.ready = False
+        return self._start_cleanup(model, preparation)
+
+    def _start_cleanup(
+        self,
+        model: MLModel,
+        preparation: asyncio.Task | None = None,
+    ) -> asyncio.Task:
+        task = self._cleanup_tasks.get(model)
+        if task is None:
+            if preparation is not None:
+                self._cleanup_preparations[model] = preparation
+            preparation = self._cleanup_preparations.get(model)
+            task = create_task_independent(self._cleanup_model(model, preparation))
+            self._cleanup_tasks[model] = task
+            task.add_done_callback(lambda done: self._cleanup_done(model, done))
+        return task
+
+    def _cleanup_done(self, model: MLModel, task: asyncio.Task) -> None:
+        if not task.cancelled() and task.exception() is None:
+            self._cleanup_tasks.pop(model, None)
+            self._cleanup_preparations.pop(model, None)
+        else:
+            logger.error(
+                f"Cleanup of model '{model.name}' did not complete; "
+                "ownership retained until explicit unload retries cleanup.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
+
+    async def _drain_cleanup(
+        self,
+        retry: bool = False,
+        models: Sequence[MLModel] | None = None,
+    ) -> None:
+        for model, task in list(self._cleanup_tasks.items()):
+            if models is not None and model not in models:
+                # Preserve serialization across the entire model name while
+                # another version is still mutating. A settled sibling failure
+                # stays recorded but must not trigger an unrelated cleanup retry.
+                if task.cancelled():
+                    raise ModelUnloadError(
+                        "Another version has interrupted cleanup; "
+                        "retry its unload first"
+                    )
+                try:
+                    await asyncio.shield(task)
+                except Exception:
+                    pass
+                continue
+            if retry and task.done() and (task.cancelled() or task.exception()):
+                self._cleanup_tasks.pop(model)
+                task = self._start_cleanup(model)
+            await asyncio.shield(task)
+
+    async def _retry_cleanup(self) -> list[BaseException]:
+        # Join unfinished mutations before starting any independent cleanup.
+        # A cancelled cleanup waiter may still own live preparation separately.
+        for model, task in list(self._cleanup_tasks.items()):
+            if not task.done():
+                try:
+                    await asyncio.shield(task)
+                except Exception:
+                    pass
+            preparation = self._cleanup_preparations.get(model)
+            if preparation is not None:
+                try:
+                    await asyncio.shield(preparation)
+                except asyncio.CancelledError:
+                    if preparation.cancelled():
+                        raise ModelUnloadError(
+                            "Preparation completion is uncertain; ownership retained"
+                        )
+                    raise
+                except Exception:
+                    pass
+
+        retries = []
+        for model, task in list(self._cleanup_tasks.items()):
+            if task.cancelled() or task.exception() is not None:
+                self._cleanup_tasks.pop(model)
+                retries.append(asyncio.shield(self._start_cleanup(model)))
+        results = await asyncio.gather(*retries, return_exceptions=True)
+        return [result for result in results if isinstance(result, BaseException)]
+
+    async def _cleanup_model(
+        self,
+        model: MLModel,
+        preparation: asyncio.Task | None,
+    ) -> None:
+        if preparation is not None:
+            try:
+                await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                if preparation.cancelled():
+                    raise ModelUnloadError(
+                        "Preparation was cancelled before settlement; "
+                        "native resources may remain live and ownership is retained"
+                    )
+                raise
+            except Exception:
+                # Preparation errors are reported by the load caller. They do
+                # not remove the obligation to release partially built state.
+                pass
         with model_context(model.settings):
-            model_msg = f"model '{model.name}'"
-            version = _get_version(model.settings) or ""
-            if version:
-                model_msg = f"version {model.version} of {model_msg}"
-
-            # Unregister any pending reloads - unload overrides them
-            pending_model = self._pending_reload.pop(version, None)
-
-            if rollback:
-                if pending_model:
-                    # If this is a rollback unload, and a pending reload model exists,
-                    # then we want to cleanup the pending model and maintain the state
-                    # of any existing old model
-                    model = pending_model
-                else:
-                    # If this is a rollback unload, and a pending reload model does
-                    # not exist, then there is nothing to rollback so this is a no-op
-                    return
-            else:
-                if pending_model:
-                    # If this is not a rollback unload, and a pending reload model
-                    # exists, then that means we need to complete the reload by
-                    # registering the new model and cleaning up the old one
-                    self._register(pending_model)
-                else:
-                    # If this is not a rollback unload, and no pending reload model
-                    # exists, then that means this is a standard unload and the model
-                    # should be unregistered and cleaned up
-                    self._unregister(model)
-
-            model.ready = False
-
-            unload_hook_failures = []
+            failures = []
             for callback in self._on_model_unload:
                 try:
-                    # NOTE: Callbacks need to be executed sequentially to ensure that
-                    # they go in the right order
                     model = await callback(model)
-                except Exception as unload_hook_failure:
-                    logger.error(
-                        f"Unload hook failed for {model_msg}",
-                        exc_info=True,
-                    )
-                    unload_hook_failures.append(unload_hook_failure)
-
-            # Cleanup is best effort
-            # Always attempt model.unload() even if hooks failed
+                except Exception as error:
+                    logger.error("Unload hook failed", exc_info=True)
+                    failures.append(error)
             try:
                 if not await model.unload():
                     raise ModelUnloadError(
-                        f"Model unload returned False for {model_msg}."
+                        f"Model unload returned False for model '{model.name}'."
                     )
             except Exception:
-                # Track cleanup failures
                 self._increment_cleanup_failure_metric(model.name, model.version)
-                logger.error(
-                    f"Failed to unload {model_msg}. Model removed from registry, "
-                    f"but resources may still be held.",
-                    exc_info=True,
-                )
                 raise
-
-            if unload_hook_failures:
-                # Track cleanup failures
+            if failures:
                 self._increment_cleanup_failure_metric(model.name, model.version)
                 raise ModelUnloadError(
-                    f"{len(unload_hook_failures)} unload hook(s) "
-                    f"failed for {model_msg}. Model removed "
-                    "from registry, but some resources "
-                    "may still be held."
-                )
-
-            logger.info(f"Unloaded {model_msg} successfully.")
+                    f"{len(failures)} unload hook(s) failed for model '{model.name}'."
+                ) from failures[0]
+            logger.info(f"Unloaded model '{model.name}' successfully.")
 
     def _find_exact_version(self, version: str | None) -> MLModel | None:
         if version:
@@ -430,12 +644,17 @@ class SingleModelRegistry:
         self._refresh_default(model)
 
     def _unregister(self, model: MLModel):
-        if model.version:
-            del self._versions[model.version]
-        if model == self.default:
+        # Settings can have changed in a hook since this instance was keyed.
+        # Removing by its current version can strand an earlier registration.
+        for version, registered in list(self._versions.items()):
+            if registered is model:
+                del self._versions[version]
+        if model is self._default:
             self._clear_default()
 
     def empty(self) -> bool:
+        if self._cleanup_tasks:
+            return False
         if self._versions:
             return False
 
@@ -497,7 +716,7 @@ class MultiModelRegistry:
             return await self._models[model_settings.name].load(
                 model_settings, parallel
             )
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             # Clean up the single model registry on load failure if empty
             if (
                 model_settings.name in self._models
@@ -519,9 +738,9 @@ class MultiModelRegistry:
         try:
             await model_registry.unload()
         finally:
-            # Always remove from registry - SingleModelRegistry is empty after
-            # unload regardless of success (models removed before actual unload)
-            del self._models[name]
+            # Keep resource owners after serving entries have been removed.
+            if model_registry.empty():
+                del self._models[name]
 
     @with_operation_lock(
         lambda self, name, *args, **kwargs: self._get_operation_lock(name)
@@ -550,6 +769,23 @@ class MultiModelRegistry:
             if model_registry.empty():
                 del self._models[name]
 
+    @with_operation_lock(
+        lambda self, model_settings, *args, **kwargs: self._get_operation_lock(
+            model_settings.name
+        )
+    )
+    @defer_cancellation(lambda self, *args, **kwargs: self._model_operation_timeout)
+    async def _unload_exact_version(
+        self, model_settings: ModelSettings, rollback: bool = False
+    ) -> None:
+        name = model_settings.name
+        model_registry = self._get_model_registry(name, model_settings.version)
+        try:
+            await model_registry._unload_exact_version(model_settings.version, rollback)
+        finally:
+            if model_registry.empty():
+                del self._models[name]
+
     async def get_model(self, name: str, version: str | None = None) -> MLModel:
         model_registry = self._get_model_registry(name, version)
         return await model_registry.get_model(version)
@@ -557,7 +793,10 @@ class MultiModelRegistry:
     async def get_models(self, name: str | None = None) -> list[MLModel]:
         if name is not None:
             model_registry = self._get_model_registry(name)
-            return await model_registry.get_models()
+            models = await model_registry.get_models()
+            if not models:
+                raise ModelNotFound(name)
+            return models
 
         models_list = await asyncio.gather(
             *[model.get_models() for model in self._models.values()]

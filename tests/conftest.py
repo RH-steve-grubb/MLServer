@@ -477,6 +477,7 @@ async def inference_pool_registry(
     settings: Settings, prometheus_registry: CollectorRegistry
 ) -> AsyncGenerator[InferencePoolRegistry, None]:
     registry = InferencePoolRegistry(settings)
+    await registry.start()
     yield registry
 
     await registry.close()

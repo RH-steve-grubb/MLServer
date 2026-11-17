@@ -1,6 +1,6 @@
 import pytest
 import asyncio
-from types import SimpleNamespace
+from unittest.mock import Mock
 from typing import cast
 
 from mlserver.types import InferenceResponse
@@ -105,7 +105,7 @@ async def test_on_worker_ready_adds_worker_to_routing(
     responses,
 ):
     worker_pid = 1234
-    worker = cast(Worker, SimpleNamespace(pid=worker_pid))
+    worker = cast(Worker, Mock(spec=Worker, pid=worker_pid))
     dispatcher = Dispatcher({}, responses)
 
     dispatcher.on_worker_ready(worker)
@@ -122,7 +122,7 @@ async def test_dispatch_update_waits_for_worker_start(
 ):
     dispatcher = Dispatcher({}, responses)
     worker_pid = 1234
-    worker = cast(Worker, SimpleNamespace(pid=worker_pid))
+    worker = cast(Worker, Mock(spec=Worker, pid=worker_pid))
     dispatcher._workers[worker_pid] = worker
     init_started = asyncio.Event()
     release_init = asyncio.Event()
@@ -155,7 +155,7 @@ async def test_dispatch_update_serializes_updates(
     mocker,
 ):
     worker_pid = 1234
-    worker = cast(Worker, SimpleNamespace(pid=worker_pid))
+    worker = cast(Worker, Mock(spec=Worker, pid=worker_pid))
     dispatcher = Dispatcher({worker_pid: worker}, responses)
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
@@ -186,8 +186,8 @@ async def test_dispatch_update_raises_non_worker_error(
 ):
     first_pid = 1234
     second_pid = 5678
-    first_worker = cast(Worker, SimpleNamespace(pid=first_pid))
-    second_worker = cast(Worker, SimpleNamespace(pid=second_pid))
+    first_worker = cast(Worker, Mock(spec=Worker, pid=first_pid))
+    second_worker = cast(Worker, Mock(spec=Worker, pid=second_pid))
     dispatcher = Dispatcher(
         {first_pid: first_worker, second_pid: second_worker}, responses
     )
@@ -208,8 +208,8 @@ async def test_dispatch_update_raises_when_all_workers_stop_for_load(
 ):
     first_pid = 1234
     second_pid = 5678
-    first_worker = cast(Worker, SimpleNamespace(pid=first_pid))
-    second_worker = cast(Worker, SimpleNamespace(pid=second_pid))
+    first_worker = cast(Worker, Mock(spec=Worker, pid=first_pid))
+    second_worker = cast(Worker, Mock(spec=Worker, pid=second_pid))
     dispatcher = Dispatcher(
         {first_pid: first_worker, second_pid: second_worker}, responses
     )
@@ -230,8 +230,8 @@ async def test_dispatch_update_returns_successes_when_some_workers_stop(
 ):
     first_pid = 1234
     second_pid = 5678
-    first_worker = cast(Worker, SimpleNamespace(pid=first_pid))
-    second_worker = cast(Worker, SimpleNamespace(pid=second_pid))
+    first_worker = cast(Worker, Mock(spec=Worker, pid=first_pid))
+    second_worker = cast(Worker, Mock(spec=Worker, pid=second_pid))
     dispatcher = Dispatcher(
         {first_pid: first_worker, second_pid: second_worker}, responses
     )
@@ -252,8 +252,8 @@ async def test_dispatch_update_allows_all_workers_to_stop_during_unload(
 ):
     first_pid = 1234
     second_pid = 5678
-    first_worker = cast(Worker, SimpleNamespace(pid=first_pid))
-    second_worker = cast(Worker, SimpleNamespace(pid=second_pid))
+    first_worker = cast(Worker, Mock(spec=Worker, pid=first_pid))
+    second_worker = cast(Worker, Mock(spec=Worker, pid=second_pid))
     dispatcher = Dispatcher(
         {first_pid: first_worker, second_pid: second_worker}, responses
     )
@@ -270,7 +270,7 @@ async def test_on_worker_start_defers_cancellation_until_initialization_finishes
     responses,
 ):
     dispatcher = Dispatcher({}, responses)
-    worker = cast(Worker, SimpleNamespace(pid=1234))
+    worker = cast(Worker, Mock(spec=Worker, pid=1234))
     init_started = asyncio.Event()
     release_init = asyncio.Event()
 
@@ -294,7 +294,7 @@ async def test_on_worker_start_defers_cancellation_until_initialization_finishes
 async def test_dispatch_update_defers_cancellation_until_broadcast_finishes(
     responses, load_message, mocker
 ):
-    worker = cast(Worker, SimpleNamespace(pid=1234))
+    worker = cast(Worker, Mock(spec=Worker, pid=1234))
     dispatcher = Dispatcher({worker.pid: worker}, responses)
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
@@ -321,7 +321,7 @@ async def test_dispatch_update_defers_cancellation_until_broadcast_finishes(
 
 async def test_stop_cleans_up_response_processing(responses, mocker):
     worker_pid = 1234
-    worker = cast(Worker, SimpleNamespace(pid=worker_pid))
+    worker = cast(Worker, Mock(spec=Worker, pid=worker_pid))
     workers = {worker_pid: worker}
     dispatcher = Dispatcher(workers, responses)
     shutdown_executor = mocker.patch.object(
@@ -338,6 +338,86 @@ async def test_stop_cleans_up_response_processing(responses, mocker):
     assert workers == {worker_pid: worker}
     assert response_task is not None
     assert response_task.done()
-    shutdown_executor.assert_called_once_with()
+    shutdown_executor.assert_called_once_with(wait=False)
     with pytest.raises(NoWorkersAvailable):
         dispatcher._get_worker()
+
+
+async def test_late_response_cannot_resolve_newer_request(event_loop, load_message):
+    # Purpose: Exercise a late reply for a cancelled operation alongside a newer request
+    # to the same worker.
+    # Expect: The old reply cannot resolve the newer UUID or raise an unhandled callback
+    # error.
+    # Method: Schedule two controlled futures, cancel the old one, deliver each response
+    # separately and inspect future completion plus the loop exception handler.
+    from mlserver.parallel.dispatcher import AsyncResponses
+
+    responses = AsyncResponses()
+    worker = cast(Worker, Mock(spec=Worker, pid=1234))
+    older = responses._schedule(load_message, worker)
+    newer_message = load_message.model_copy(update={"id": "newer-operation"})
+    newer = responses._schedule(newer_message, worker)
+    errors = []
+    original_handler = event_loop.get_exception_handler()
+    event_loop.set_exception_handler(lambda loop, context: errors.append(context))
+    try:
+        older.cancel()
+        responses.resolve(ModelResponseMessage(id=load_message.id))
+        await asyncio.sleep(0)
+        assert older.cancelled()
+        assert not newer.done()
+        responses.resolve(ModelResponseMessage(id=newer_message.id))
+        await asyncio.sleep(0)
+        assert newer.done()
+        assert not errors
+    finally:
+        newer.cancel()
+        event_loop.set_exception_handler(original_handler)
+
+
+async def test_stopped_dispatcher_does_not_restart_failed_reader(responses, mocker):
+    # Purpose: Exercise a response-reader failure callback arriving after dispatcher
+    # shutdown begins.
+    # Expect: The callback must not restart a reader against a stopped
+    # dispatcher/executor.
+    # Method: Supply a settled failing task to the callback on an inactive dispatcher
+    # and assert its mocked start method was not called.
+    dispatcher = Dispatcher({}, responses)
+    start = mocker.patch.object(dispatcher, "start")
+
+    async def fail():
+        raise RuntimeError("reader failed as shutdown started")
+
+    task = asyncio.create_task(fail())
+    await asyncio.gather(task, return_exceptions=True)
+    dispatcher._process_responses_cb(task)
+    start.assert_not_called()
+    await dispatcher.stop()
+
+
+async def test_cancel_after_response_resolution_is_queued():
+    # Purpose: Exercise caller cancellation after reply handling queues completion onto
+    # the future's loop.
+    # Expect: The callback rechecks completion state and avoids InvalidStateError on the
+    # cancelled future.
+    # Method: Call resolve before cancel, yield to run the queued callback and inspect
+    # the loop's captured exception contexts.
+    from mlserver.parallel.dispatcher import AsyncResponses
+
+    responses = AsyncResponses()
+    worker = cast(Worker, Mock(spec=Worker, pid=12345))
+    message = ModelResponseMessage()
+    future = responses._schedule(message, worker)
+    loop = asyncio.get_running_loop()
+    errors = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _, context: errors.append(context))
+    try:
+        responses.resolve(message)
+        # Exercise the handoff race, after resolve queued its loop callback.
+        future.cancel()
+        await asyncio.sleep(0)
+        assert not errors
+    finally:
+        responses._clear_message(message.id)
+        loop.set_exception_handler(previous)

@@ -2,6 +2,7 @@ import asyncio
 import random
 
 from contextlib import nullcontext
+from weakref import WeakSet
 from multiprocessing import Queue
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,13 +10,14 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from prometheus_client import Counter
 
 from ..model import MLModel
-from ..utils import defer_cancellation, with_operation_lock
+from ..registry import _model_load_hooks_active
+from ..utils import defer_cancellation, with_operation_lock, create_task_independent
 from ..types import InferenceRequest, InferenceResponse
 from ..settings import Settings, ModelSettings
 from ..env import Environment
 
 from .model import ParallelModel
-from .errors import InferencePoolUnavailable
+from .errors import InferencePoolUnavailable, WorkerStop
 from .worker import Worker, WorkerModelHook
 from .logging import logger
 from .utils import configure_inference_pool, terminate_queue
@@ -31,17 +33,22 @@ PredictMethod = Callable[[InferenceRequest], Awaitable[InferenceResponse]]
 InferencePoolHook = Callable[[Worker], Awaitable[None]]
 
 
-def _spawn_worker(
-    settings: Settings,
-    responses: Queue,
-    env: Environment | None,
-    on_worker_load: Sequence[WorkerModelHook],
-    on_worker_unload: Sequence[WorkerModelHook],
-) -> Worker:
-    with env or nullcontext():
-        worker = Worker(settings, responses, env, on_worker_load, on_worker_unload)
+def _spawn_worker(pool: "InferencePool") -> Worker:
+    worker = Worker(
+        pool._settings,
+        pool._responses,
+        pool._env,
+        pool._on_worker_load,
+        pool._on_worker_unload,
+    )
+    # Worker construction is lightweight. Own it before queue acquisition and
+    # start(), which can raise even after exposing a native child.
+    pool._unstarted_workers.add(worker)
+    with pool._env or nullcontext():
         worker.start()
-
+    assert worker.pid is not None
+    pool._starting_workers[worker.pid] = worker
+    pool._unstarted_workers.discard(worker)
     return worker
 
 
@@ -59,7 +66,7 @@ class WorkerRegistry:
 
     def add(self, model_settings: ModelSettings):
         model_key = self._key(model_settings)
-        self._models[model_key] = model_settings
+        self._models[model_key] = model_settings.model_copy(deep=True)
 
     def remove(self, model_settings: ModelSettings):
         model_key = self._key(model_settings)
@@ -115,22 +122,82 @@ class InferencePool:
         on_worker_load: Sequence[WorkerModelHook] = [],
         on_worker_unload: Sequence[WorkerModelHook] = [],
     ):
-        configure_inference_pool(settings)
-
         self._on_worker_stop = on_worker_stop
         self._on_worker_load = on_worker_load
         self._on_worker_unload = on_worker_unload
         self._env = env
         self._pool_gid = pool_gid
         self._workers: dict[int, Worker] = {}
+        # Acquisition owners are distinct from registered/routable workers.
+        # Close and SIGCHLD must see them before dispatch can safely use them.
+        self._starting_workers: dict[int, Worker] = {}
+        self._unstarted_workers: set[Worker] = set()
+        self._start_task: asyncio.Task | None = None
+        self._started = False
+        self._initialization_error: BaseException | None = None
+        self._cleanup_error: BaseException | None = None
+        # Replay holds committed configuration. Staged/pending replacements
+        # also own resources, so this inventory alone cannot decide pool lifetime.
         self._worker_registry = WorkerRegistry()
         self._pending_reload: dict[tuple[str, str], MLModel] = {}
         self._closing = False
+        self._close_task: asyncio.Task | None = None
+        # Confirmed-exit workers can still own unretired queues while a later
+        # incarnation reuses their PID. Keep both resource owners by identity.
+        self._closing_workers: dict[int, Worker] = {}
+        self._restart_tasks: set[asyncio.Task] = set()
+        self._recovery_task: asyncio.Task | None = None
+        self._staged: dict[ParallelModel, asyncio.Future] = {}
+        self._quarantined_workers: dict[int, Worker] = {}
+        self._retired_models: WeakSet[MLModel] = WeakSet()
         self._operation_lock = asyncio.Lock()
         self._settings = settings
-        self._responses: Queue[ModelResponseMessage] = Queue()
+        self._response_queue: Queue[ModelResponseMessage] | None = None
+        self._owned_dispatcher: Dispatcher | None = None
         self._transport_directory: TemporaryDirectory[str] | None = None
-        if settings.parallel_inference_transport == "zmq":
+
+    @property
+    def _responses(self) -> "Queue[ModelResponseMessage]":
+        assert self._response_queue is not None
+        return self._response_queue
+
+    @property
+    def _dispatcher(self) -> Dispatcher:
+        assert self._owned_dispatcher is not None
+        return self._owned_dispatcher
+
+    @defer_cancellation(lambda self: self._settings.model_operation_timeout)
+    async def start(self) -> None:
+        """Activate only after a manager has retained this lightweight owner."""
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
+        if self._start_task is None:
+            self._start_task = create_task_independent(self._start())
+        try:
+            await asyncio.shield(self._start_task)
+        except (Exception, asyncio.CancelledError) as primary:
+            self._initialization_error = primary
+            try:
+                await self.close()
+            except (Exception, asyncio.CancelledError) as cleanup:
+                self._cleanup_error = cleanup
+                setattr(primary, "cleanup_error", cleanup)
+            raise
+
+    @with_operation_lock(lambda self: self._operation_lock)
+    @defer_cancellation(lambda self: self._settings.model_operation_timeout)
+    async def _start(self) -> None:
+        await self._activate()
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
+        self._started = True
+
+    async def _activate(self) -> None:
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
+        configure_inference_pool(self._settings)
+        self._response_queue = Queue()
+        if self._settings.parallel_inference_transport == "zmq":
             from .zmq import create_endpoint
 
             # Only endpoint strings cross spawn. The parent owns the private
@@ -138,23 +205,21 @@ class InferencePool:
             self._transport_directory = TemporaryDirectory(prefix="mlserver-ipc-")
             reply = create_endpoint(Path(self._transport_directory.name), "r")
             setattr(self._responses, "_zmq_reply_endpoint", reply)
-        for _ in range(self._settings.parallel_workers):
-            worker = _spawn_worker(
-                self._settings,
-                self._responses,
-                self._env,
-                self._on_worker_load,
-                self._on_worker_unload,
-            )
-            self._workers[worker.pid] = worker  # type: ignore
-
-        self._dispatcher = Dispatcher(
+        self._owned_dispatcher = Dispatcher(
             self._workers,
             self._responses,
             model_operation_timeout=self._settings.model_operation_timeout,
             worker_start_timeout=self._settings.worker_start_timeout,
         )
         self._dispatcher.start()
+        for _ in range(self._settings.parallel_workers):
+            if self._closing:
+                raise InferencePoolUnavailable(self.name)
+            worker = _spawn_worker(self)
+            assert worker.pid is not None
+            self._workers[worker.pid] = worker
+            self._starting_workers.pop(worker.pid, None)
+            self._dispatcher.on_worker_ready(worker)
 
     @property
     def env_hash(self) -> str | None:
@@ -181,49 +246,81 @@ class InferencePool:
         # If the inference pool is closing, or the current worker
         # is not in this inference pool, worker stop handling
         # should be skipped
+        for closing in self._closing_workers.values():
+            if closing.pid == pid and closing.exitcode is None:
+                closing.record_exit(exit_code)
+                return
         if pid not in self._workers:
+            # Registration may be waiting for the dispatcher lock. Its startup
+            # task still owns this child, including waitpid's confirmed status.
+            starting = self._starting_workers.get(pid)
+            if starting is not None:
+                starting.record_exit(exit_code)
+            for worker in self._unstarted_workers:
+                if worker.pid == pid:
+                    worker.record_exit(exit_code)
             return
 
         worker = self._workers[pid]
+        worker.record_exit(exit_code)
         logger.warning(
             f"Worker with PID {worker.pid} on {self.name} stopped "
             f"unexpectedly with exit code {exit_code}. "
             "Triggering worker restart..."
         )
 
-        # Unregister worker from the dispatcher and inference pool
-        self._dispatcher.on_worker_stop(worker, exit_code)
-        if pid in self._workers:
-            # NOTE: worker may be removed by dispatcher
-            del self._workers[pid]
-
+        # Dispatcher revocation removes active ownership and can then raise
+        # during socket cleanup. Retain retirement before that fallible step.
+        self._closing_workers[id(worker)] = worker
+        failures: list[BaseException] = []
         try:
+            try:
+                self._dispatcher.on_worker_stop(worker, exit_code)
+            except (Exception, asyncio.CancelledError) as error:
+                failures.append(error)
+            if self._workers.get(pid) is worker:
+                del self._workers[pid]
             # Best effort execution of on worker stop hooks
-            results = await asyncio.gather(
-                *[callback(worker) for callback in self._on_worker_stop],
-                return_exceptions=True,
-            )
-            failures = [r for r in results if isinstance(r, Exception)]
-            if failures:
-                # Track cleanup failures
-                self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
-                logger.error(
-                    f"{len(failures)} worker stop hook(s) failed "
-                    f"for PID {pid} on {self.name}",
+            try:
+                results = await asyncio.gather(
+                    *[callback(worker) for callback in self._on_worker_stop],
+                    return_exceptions=True,
                 )
-                raise failures[0]
+                failures.extend(r for r in results if isinstance(r, BaseException))
+            except (Exception, asyncio.CancelledError) as error:
+                failures.append(error)
         finally:
             # The child has already been reaped by the SIGCHLD handler. Clean
             # up the parent-side queue resources before discarding the worker.
-            worker.close_queues()
+            try:
+                await worker.retire_queues(self._settings.parallel_workers_timeout)
+            except (Exception, asyncio.CancelledError) as error:
+                # Keep the existing logged/retained result for an ordinary
+                # queue-only failure. Revocation/hook failure still exposes
+                # this secondary error; genuine cancellation must propagate.
+                if failures or isinstance(error, asyncio.CancelledError):
+                    failures.append(error)
+                else:
+                    self._cleanup_error = error
+                logger.error(
+                    f"Queue cleanup for worker {pid} remains owned until close",
+                    exc_info=True,
+                )
+            else:
+                self._closing_workers.pop(id(worker), None)
 
-            # create_task is intentional: allows the SIGCHLD handler to process
-            # all crashed PIDs immediately rather than blocking on each
-            # replacement's replay. The task is kept alive by the event loop's
-            # execution machinery (Handle → lock waiter → gather futures)
-            # throughout its lifetime — no GC risk.
+            # Restart independently of the signal handler and its inherited
+            # timeout context. Keep each owner until its result is observed.
             if not self._closing:
-                asyncio.create_task(self._safe_start_worker())  # noqa: RUF006
+                task = create_task_independent(self._safe_start_worker())
+                self._restart_tasks.add(task)
+                task.add_done_callback(self._restart_tasks.discard)
+        if failures:
+            self._cleanup_error = failures[0]
+            if len(failures) > 1:
+                setattr(failures[0], "cleanup_error", failures[1])
+            self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
+            raise failures[0]
 
     async def _safe_start_worker(self):
         """
@@ -233,6 +330,19 @@ class InferencePool:
         # Jitter before spawning: rate-limits rapid fork cycles and guarantees
         # a lock-free window so operator unloads can break a crash loop
         await asyncio.sleep(random.uniform(0.5, 2.0))
+        if self._closing:
+            return
+        if self._staged or self._recovery_task is not None:
+            # The dependency may outlast worker initialization's deadline.
+            # Transfer the obligation to another retained owner; do not turn
+            # dependency expiry into a dropped replacement or a busy retry.
+            task = create_task_independent(self._finish_restart())
+            self._restart_tasks.add(task)
+            task.add_done_callback(self._restart_tasks.discard)
+            return
+        await self._finish_restart()
+
+    async def _finish_restart(self) -> None:
         try:
             await self._start_worker()
         except Exception:
@@ -241,34 +351,84 @@ class InferencePool:
                 exc_info=True,
             )
 
-    @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
+    async def _start_worker(self) -> Worker | None:
+        # Wait without the pool lock: lifecycle completion may need that lock.
+        # Recheck after acquisition because new preparation can arrive meanwhile.
+        while not self._closing:
+            if self._staged:
+                await asyncio.gather(
+                    *[asyncio.shield(f) for f in self._staged.values()]
+                )
+            await self._settle_recovery()
+            async with self._operation_lock:
+                if self._closing:
+                    return None
+                if self._staged or self._recovery_task is not None:
+                    continue
+                return await self._initialize_worker()
+        return None
+
     @defer_cancellation(
         lambda self, *args, **kwargs: self._settings.worker_start_timeout
     )
-    async def _start_worker(self) -> Worker | None:
-        # Do not start a worker if the pool is closing
+    async def _initialize_worker(self) -> Worker | None:
         if self._closing:
             return None
-        worker = _spawn_worker(
-            self._settings,
-            self._responses,
-            self._env,
-            self._on_worker_load,
-            self._on_worker_unload,
-        )
+        # Spawn may acquire queues or expose a child before returning. The
+        # operation lock serializes attempts; select only this attempt's new
+        # owner, leaving older failed cleanup and healthy siblings untouched.
+        unstarted = self._unstarted_workers.copy()
+        try:
+            worker = _spawn_worker(self)
+        except (Exception, asyncio.CancelledError) as primary:
+            for candidate in self._unstarted_workers - unstarted:
+                try:
+                    await self._rollback_worker(candidate)
+                except (Exception, asyncio.CancelledError) as cleanup:
+                    setattr(primary, "cleanup_error", cleanup)
+                    logger.error(
+                        "Replacement acquisition rollback failed; owner retained",
+                        exc_info=True,
+                    )
+            raise
+        assert worker.pid is not None
+        # Own the PID before registration can suspend, without making this
+        # child routable or eligible for lifecycle update broadcasts.
+        self._starting_workers[worker.pid] = worker
         logger.info(f"Starting new worker with PID {worker.pid} on {self.name}...")
 
         # Phase 1/2 replay runs inside the dispatcher lock via on_worker_start
         # to ensure no concurrent dispatch_update can reach the replacement
         # worker in an inconsistent state during initialization
+        replay = self._replay_worker(worker)
         try:
-            await self._dispatcher.on_worker_start(worker, self._replay_worker(worker))
-        except (Exception, asyncio.CancelledError):
+            await self._dispatcher.on_worker_start(worker, replay)
+            if not self._closing:
+                exit_code = worker.exitcode
+                if exit_code is not None:
+                    # Empty replay can complete without receiving a response.
+                    # Observe a dead child instead of publishing it as ready;
+                    # this also handles an exit polled before the SIGCHLD task.
+                    await self.on_worker_stop(worker.pid, exit_code)
+                    raise WorkerStop(exit_code)
+        except (Exception, asyncio.CancelledError) as primary:
             # Replay can fail through an operation error, timeout, or
             # cancellation. In every case the replacement worker is not safe
             # to publish as ready.
-            worker.kill()
+            try:
+                await self._rollback_worker(worker)
+            except (Exception, asyncio.CancelledError) as cleanup:
+                setattr(primary, "cleanup_error", cleanup)
+                logger.error(
+                    "Replacement rollback failed; owner retained", exc_info=True
+                )
             raise
+        finally:
+            # A deadline while waiting for dispatcher registration may leave
+            # replay unawaited. Startup has settled, so it cannot run later.
+            replay.close()
+            if self._starting_workers.get(worker.pid) is worker:
+                self._starting_workers.pop(worker.pid, None)
 
         if not self._closing:
             self._dispatcher.on_worker_ready(worker)
@@ -276,9 +436,49 @@ class InferencePool:
                 f"New worker with PID {worker.pid} on {self.name} is now ready."
             )
         else:
-            worker.kill()
+            assert worker.pid is not None
+            if not worker.queues_retired:
+                self._closing_workers[id(worker)] = worker
+            self._dispatcher.on_worker_stop(worker, -1)
             return None
         return worker
+
+    async def _rollback_worker(self, worker: Worker) -> None:
+        # Transfer before revocation: it can remove the active entry and fail.
+        # An unresolved socket remains owned by the transport independently.
+        if not worker.queues_retired:
+            self._closing_workers[id(worker)] = worker
+        # Acquisition can fail before a PID exists. Drop its earlier slot only
+        # after the retirement owner above can manage those partial resources.
+        self._unstarted_workers.discard(worker)
+        failures: list[BaseException] = []
+        try:
+            self._dispatcher.on_worker_stop(worker, -1)
+        except (Exception, asyncio.CancelledError) as error:
+            failures.append(error)
+        # Close joins accepted startup and sweeps these retained workers. If it
+        # already took ownership, do not start a competing native retirement.
+        if not self._closing and not worker.queues_retired:
+            try:
+                # Partial queue allocation has no PID. It still needs parent
+                # resource cleanup, without claiming a child ever existed.
+                if worker.pid is not None and worker.exitcode is None:
+                    worker.kill()
+                    await asyncio.to_thread(
+                        worker.join, self._settings.parallel_workers_timeout
+                    )
+                if worker.pid is not None and worker.exitcode is None:
+                    raise RuntimeError(f"Worker {worker.pid} has not confirmed exit")
+                await worker.retire_queues(self._settings.parallel_workers_timeout)
+            except (Exception, asyncio.CancelledError) as error:
+                failures.append(error)
+            else:
+                self._closing_workers.pop(id(worker), None)
+        if failures:
+            self._cleanup_error = failures[0]
+            if len(failures) > 1:
+                setattr(failures[0], "cleanup_error", failures[1])
+            raise failures[0]
 
     async def _replay_worker(self, worker: Worker):
         """
@@ -304,7 +504,7 @@ class InferencePool:
             ],
             return_exceptions=True,
         )
-        load_failures = [r for r in load_results if isinstance(r, Exception)]
+        load_failures = [r for r in load_results if isinstance(r, BaseException)]
         if load_failures:
             raise load_failures[0]
 
@@ -323,7 +523,7 @@ class InferencePool:
             ],
             return_exceptions=True,
         )
-        reload_failures = [r for r in reload_results if isinstance(r, Exception)]
+        reload_failures = [r for r in reload_results if isinstance(r, BaseException)]
         if reload_failures:
             raise reload_failures[0]
 
@@ -337,39 +537,78 @@ class InferencePool:
     async def load_model(self, model: MLModel) -> MLModel:
         if self._closing:
             raise InferencePoolUnavailable(self.name)
-        # Check for reload
+        await self._settle_recovery()
         reload = self.has_model(model.settings)
-
-        # Register the model prior to dispatch
-        # This allows for rollback for load failure or worker crash
-        if reload:
-            self._pending_reload[self._model_key(model.settings)] = model
-        else:
-            self._worker_registry.add(model.settings)
-
+        # Replay only committed fresh loads. Reloads are staged only after
+        # every live worker acknowledges preparation.
+        prepared: ModelUpdateMessage | None = None
+        parallel_model: ParallelModel | None = None
         try:
             load_message = ModelUpdateMessage(
                 update_type=ModelUpdateType.Load,
                 model_settings=model.settings,  # type: ignore
+                rollback=reload,
             )
-            await self._dispatcher.dispatch_update(load_message)
-        except Exception:
-            # If load fails, only unregister for fresh load
-            if not reload:
-                self._worker_registry.remove(model.settings)
+            await self._dispatch_owned(load_message)
+            prepared = load_message
+            if self._closing:
+                raise InferencePoolUnavailable(self.name)
+            self._retired_models.discard(model)
+            parallel_model = self._wrap(model)
+            if _model_load_hooks_active.get():
+                # The pool hook is preparation, not frontend publication. Replay
+                # waits for the registry to finish every subsequent hook as well.
+                self._staged[parallel_model] = (
+                    asyncio.get_running_loop().create_future()
+                )
+                parallel_model._on_load_complete = lambda: self._commit_model(
+                    parallel_model, reload
+                )
+                parallel_model._on_load_failed = lambda: self._abandon_model(
+                    parallel_model, load_message
+                )
+            else:
+                self._commit_model(parallel_model, reload)
+            return parallel_model
+        except (Exception, asyncio.CancelledError):
+            self._retire(model)
+            if prepared is not None and not self._closing:
+                # Worker preparation succeeded, but wrapper construction or
+                # frontend staging did not transfer ownership. Ordinary unload
+                # could publish that abandoned worker replacement. Quarantine
+                # and acknowledge rollback before any later mutation/replay.
+                self._recover_prepared(prepared)
+            if parallel_model is not None:
+                self._release_stage(parallel_model)
             raise
 
-        # Wrap the model in the ParallelModel class so that the main process
-        # does not load/unload the model (only done on workers)
-        if isinstance(model, ParallelModel):
-            return model
+    def _release_stage(self, model: ParallelModel) -> None:
+        future = self._staged.pop(model, None)
+        if future is not None and not future.done():
+            future.set_result(None)
 
-        parallel_model = ParallelModel(model, self._dispatcher)
+    def _commit_model(self, model: ParallelModel, reload: bool) -> None:
+        if self._closing:
+            raise InferencePoolUnavailable(self.name)
         if reload:
-            # Ensure the model tracked in pending reload list is the same
-            # as the returned instance
-            self._pending_reload[self._model_key(model.settings)] = parallel_model
-        return parallel_model
+            self._pending_reload[self._model_key(model.settings)] = model
+            if model in self._staged:
+                model.ready = True
+        else:
+            self._worker_registry.add(model.settings)
+        self._release_stage(model)
+
+    def _abandon_model(self, model: ParallelModel, message: ModelUpdateMessage) -> None:
+        if model not in self._staged:
+            return
+        self._retire(model)
+        self._recover_prepared(message)
+        self._release_stage(model)
+
+    def _recover_prepared(self, message: ModelUpdateMessage) -> None:
+        dispatch = asyncio.get_running_loop().create_future()
+        dispatch.set_result(None)
+        self._begin_recovery(dispatch, message)
 
     @with_operation_lock(lambda self, *args, **kwargs: self._operation_lock)
     @defer_cancellation(
@@ -378,33 +617,25 @@ class InferencePool:
     async def unload_model(self, model: MLModel) -> MLModel:
         if self._closing:
             raise InferencePoolUnavailable(self.name)
-        # Unregister any pending reloads - unload overrides them
-        pending_model = self._pending_reload.pop(self._model_key(model.settings), None)
-
-        # Check rollback
-        rollback = False
-        if pending_model:
-            if pending_model.ready:
-                # If a pending model exists with ready status, this indicates
-                # successful reload load, so we register the new model and
-                # unload the old model
-                self._worker_registry.add(pending_model.settings)
-            else:
-                # If a pending model exists with not ready status, this indicates
-                # failed reload load, so we keep the old model registered and
-                # perform rollback on the new model
-                rollback = True
-        else:
-            # If there is no pending model then this indicates non-reload
-            # Unregister and unload the model
+        await self._settle_recovery()
+        if model in self._retired_models:
+            return self._wrap(model)
+        key = self._model_key(model.settings)
+        pending_model = self._pending_reload.pop(key, None)
+        rollback = pending_model is not None and not pending_model.ready
+        if pending_model is not None and not rollback:
+            # This is the publication point for replay. A later failure while
+            # releasing the old instance must preserve the new settings.
+            self._worker_registry.add(pending_model.settings)
+        elif pending_model is None:
             self._worker_registry.remove(model.settings)
-
+        self._retire(model)
         unload_message = ModelUpdateMessage(
             update_type=ModelUpdateType.Unload,
             model_settings=model.settings,  # type: ignore
             rollback=rollback,
         )
-        await self._dispatcher.dispatch_update(unload_message)
+        await self._dispatch_owned(unload_message)
 
         # Wrap the model in the ParallelModel class so that the main process
         # does not load/unload the model (only done on workers)
@@ -412,23 +643,159 @@ class InferencePool:
             return model
         return ParallelModel(model, self._dispatcher)
 
+    def _wrap(self, model: MLModel) -> ParallelModel:
+        return (
+            model
+            if isinstance(model, ParallelModel)
+            else ParallelModel(model, self._dispatcher)
+        )
+
+    def _retire(self, model: MLModel) -> None:
+        self._retired_models.add(model)
+        if isinstance(model, ParallelModel):
+            self._retired_models.add(model._model)
+
+    async def _settle_recovery(self) -> None:
+        while self._recovery_task is not None:
+            task = self._recovery_task
+            await asyncio.shield(task)
+            if self._recovery_task is task:
+                self._recovery_task = None
+
+    async def _dispatch_owned(self, message: ModelUpdateMessage) -> None:
+        # A frontend deadline cannot cancel an update already delivered to an
+        # independent process. Keep the response waiter until it settles.
+        dispatch = asyncio.create_task(self._dispatcher.dispatch_update(message))
+        try:
+            await asyncio.shield(dispatch)
+        except (Exception, asyncio.CancelledError):
+            self._begin_recovery(dispatch, message)
+            raise
+
+    def _begin_recovery(
+        self, dispatch: asyncio.Future, message: ModelUpdateMessage
+    ) -> None:
+        self._quarantined_workers.update(self._dispatcher._ready_workers)
+        self._dispatcher._ready_workers.clear()
+        self._dispatcher._reset_round_robin()
+        previous = self._recovery_task
+
+        async def recover():
+            if previous is not None:
+                await previous
+            await self._recover_update(dispatch, message)
+
+        self._recovery_task = create_task_independent(recover())
+        self._recovery_task.add_done_callback(self._recovery_done)
+
+    def _recovery_done(self, task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is not None:
+            logger.error(
+                f"Recovery of {self.name} failed; pool remains quarantined "
+                "and owned until close.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
+
+    async def _recover_update(
+        self,
+        dispatch: asyncio.Future,
+        message: ModelUpdateMessage,
+    ) -> None:
+        failed = None
+        try:
+            await dispatch
+        except (Exception, asyncio.CancelledError) as error:
+            failed = error
+        if self._closing:
+            return
+        if message.update_type == ModelUpdateType.Load:
+            # Settlement alone is insufficient: partial success may have left
+            # staged instances on some workers. Restore the old committed state
+            # with acknowledged cleanup before allowing any routing or replay.
+            await self._dispatcher.dispatch_update(
+                ModelUpdateMessage(
+                    update_type=ModelUpdateType.Unload,
+                    model_settings=message.model_settings,  # type: ignore
+                    rollback=message.rollback,
+                )
+            )
+        elif failed is not None:
+            # An unacknowledged unload is unsafe to replay by name: a second
+            # unload could remove the replacement which the first committed.
+            # Preserve ownership and the failure instead of guessing state.
+            raise failed
+        if not self._closing and asyncio.current_task() is self._recovery_task:
+            for pid, worker in self._quarantined_workers.items():
+                if self._workers.get(pid) is worker:
+                    self._dispatcher.on_worker_ready(worker)
+            self._quarantined_workers.clear()
+
     def has_model(self, model_settings: ModelSettings) -> bool:
         return self._worker_registry.has_model(model_settings)
 
     def empty(self) -> bool:
-        return len(self._worker_registry) == 0
+        # Replay inventory excludes preparation, but those accepted operations
+        # still own the pool. Do not auto-close it between staging and commit.
+        # An abandoned update alone can retire through close(), which retains
+        # recovery and confirms worker exit. Registry callers check
+        # this under their pool lifecycle lock; these owner transfers do not yield.
+        return (
+            len(self._worker_registry) == 0
+            and not self._staged
+            and not self._pending_reload
+        )
 
-    @with_operation_lock(lambda self: self._operation_lock)
     async def close(self) -> None:
-        if self._closing:
-            return
-        self._closing = True
+        if self._close_task is None:
+            self._closing = True
+            # Dependency/lock waiters have not accepted native initialization.
+            # Accepted initialization retains its existing deferred cancellation
+            # boundary and completes (or times out) before this owner joins it.
+            for task in list(self._restart_tasks):
+                task.cancel()
+            for model in list(self._staged):
+                self._release_stage(model)
+            self._close_task = create_task_independent(self._close())
+            self._close_task.add_done_callback(self._close_done)
+        await asyncio.shield(self._close_task)
 
-        # Best effort cleanup
-        cleanup_errors = []
+    def _close_done(self, task: asyncio.Task) -> None:
+        if task.cancelled() or task.exception() is not None:
+            logger.error(
+                f"Close of {self.name} failed; result and resources retained.",
+                exc_info=None if task.cancelled() else task.exception(),
+            )
+
+    async def _close(self) -> None:
+        cleanup_errors: list[BaseException] = []
+        # Existing accepted operations get their configured window to settle.
+        # If they stall, closure escalates to process exit rather than waiting
+        # forever on a frontend lifecycle lock.
+        try:
+            await asyncio.wait_for(
+                self._operation_lock.acquire(), self._settings.model_operation_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Lifecycle lock did not drain while closing {self.name}")
+        else:
+            self._operation_lock.release()
+
+        if self._start_task is not None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._start_task),
+                    self._settings.model_operation_timeout,
+                )
+            except (Exception, asyncio.CancelledError):
+                # A settled initialization error is the primary failure, not
+                # a cleanup failure. An unsettled task still owns activation.
+                if not self._start_task.done():
+                    cleanup_errors.append(RuntimeError("Pool activation remains owned"))
+
+        # Best effort cleanup, including partially acquired resources.
         try:
             await self._close_workers()
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to fully cleanup workers on {self.name}",
                 exc_info=True,
@@ -436,8 +803,9 @@ class InferencePool:
             cleanup_errors.append(e)
 
         try:
-            await terminate_queue(self._responses)
-        except Exception as e:
+            if self._response_queue is not None:
+                await terminate_queue(self._responses)
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to terminate response queue on {self.name}",
                 exc_info=True,
@@ -445,8 +813,9 @@ class InferencePool:
             cleanup_errors.append(e)
 
         try:
-            await self._dispatcher.stop()
-        except Exception as e:
+            if self._owned_dispatcher is not None:
+                await self._dispatcher.stop(self._settings.parallel_workers_timeout)
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to stop dispatcher on {self.name}",
                 exc_info=True,
@@ -456,18 +825,45 @@ class InferencePool:
         try:
             # The dispatcher's executor may still be reading this handle.
             # Stop and join that reader before closing the queue.
-            self._responses.close()
-        except Exception as e:
+            if self._response_queue is not None:
+                self._responses.close()
+                feeder = getattr(self._responses, "_thread", None)
+                if feeder is not None:
+                    await asyncio.to_thread(
+                        feeder.join, self._settings.parallel_workers_timeout
+                    )
+                    if feeder.is_alive():
+                        raise RuntimeError("Response queue writer remains owned")
+        except (Exception, asyncio.CancelledError) as e:
             logger.error(
                 f"Failed to close response queue on {self.name}",
                 exc_info=True,
             )
             cleanup_errors.append(e)
 
-        if self._transport_directory is not None:
+        if self._recovery_task is not None:
             try:
-                self._transport_directory.cleanup()
-            except Exception as error:
+                await asyncio.wait_for(
+                    asyncio.shield(self._recovery_task),
+                    self._settings.model_operation_timeout,
+                )
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
+        if self._restart_tasks:
+            results = await asyncio.gather(*self._restart_tasks, return_exceptions=True)
+            cleanup_errors.extend(
+                r
+                for r in results
+                if isinstance(r, BaseException)
+                and not isinstance(r, asyncio.CancelledError)
+            )
+        if self._closing_workers:
+            # Startup may register after the first sweep (for example while
+            # waiting for the dispatcher lock). No restart can spawn now;
+            # collect transferred owners with the same bounded exit checks.
+            try:
+                await self._close_workers()
+            except (Exception, asyncio.CancelledError) as error:
                 cleanup_errors.append(error)
 
         # The pool is terminal after close. No model state can be replayed or
@@ -475,56 +871,96 @@ class InferencePool:
         self._worker_registry.clear()
         self._pending_reload.clear()
 
+        if self._closing_workers or self._unstarted_workers:
+            cleanup_errors.append(
+                RuntimeError("Worker cleanup remains owned after restart settlement")
+            )
         if cleanup_errors:
             # Track cleanup failures
             self._increment_cleanup_failure_metric(self.env_hash or self._pool_gid)
             raise cleanup_errors[0]
 
-    async def _close_workers(self):
-        cleanup_errors = []
-        for pid, worker in list(self._workers.items()):
-            # Remove from registry first so that the SIGCHLD handler's
-            # on_worker_stop call returns early (pid not in _workers),
-            # preventing duplicate cleanup
-            if pid in self._workers:
-                del self._workers[pid]
-            else:
-                continue
+        if self._transport_directory is not None:
+            # Its endpoints are resources of the workers and dispatcher. Retain
+            # their directory too if cleanup did not confirm their release.
+            self._transport_directory.cleanup()
 
-            # Best effort cleanup
+        if self._env is not None:
+            # Release before the registry allows this hash to be reused.
+            # On failed/uncertain close the environment remains owned above.
+            self._env.close()
+
+    async def _close_workers(self):
+        cleanup_errors: list[BaseException] = []
+        for worker in list(self._unstarted_workers):
+            if worker.pid is not None:
+                self._closing_workers[id(worker)] = worker
+                self._unstarted_workers.discard(worker)
+                continue
             try:
-                await worker.stop()
-                worker.join(self._settings.parallel_workers_timeout)
-            except Exception as e:
-                logger.error(
-                    "Failed to complete cleanup of worker "
-                    f"with PID {pid} on {self.name}. ",
-                    exc_info=True,
-                )
-                cleanup_errors.append(e)
-            finally:
-                # Always ensure the worker is terminated
+                await worker.retire_queues(self._settings.parallel_workers_timeout)
+                self._unstarted_workers.discard(worker)
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
+        self._closing_workers.update(
+            (id(w), w) for w in self._starting_workers.values()
+        )
+        self._closing_workers.update((id(w), w) for w in self._workers.values())
+        for worker in list(self._closing_workers.values()):
+            pid = worker.pid
+            if pid is None:
+                # Failed acquisition can transfer real queues here before a
+                # process exists. None is not a live-child exit status; release
+                # parent resources without stop/kill/join or worker-stop hooks.
+                try:
+                    await worker.retire_queues(self._settings.parallel_workers_timeout)
+                except (Exception, asyncio.CancelledError) as error:
+                    cleanup_errors.append(error)
+                else:
+                    self._closing_workers.pop(id(worker), None)
+                continue
+            # Quarantine first, retaining the owner until process exit and
+            # parent queue retirement are confirmed. A kill is only a request.
+            try:
+                if self._owned_dispatcher is not None:
+                    self._dispatcher.on_worker_stop(worker, -1)
+            except (Exception, asyncio.CancelledError) as error:
+                # Revocation/socket cleanup failure must not skip confirming
+                # this child's exit or attempting independent worker cleanup.
+                cleanup_errors.append(error)
+            try:
+                if worker.exitcode is None:
+                    await asyncio.wait_for(
+                        worker.stop(), self._settings.parallel_workers_timeout
+                    )
+                    await asyncio.to_thread(
+                        worker.join, self._settings.parallel_workers_timeout
+                    )
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
+            try:
                 if worker.exitcode is None:
                     worker.kill()
-
-            logger.debug(f"Worker with PID {pid} on {self.name} stopped.")
-
-            # Cancel any in-flight requests for this worker
-            self._dispatcher.on_worker_stop(
-                worker, worker.exitcode if worker.exitcode is not None else -1
-            )
+                    await asyncio.to_thread(
+                        worker.join, self._settings.parallel_workers_timeout
+                    )
+                if worker.exitcode is None:
+                    raise RuntimeError(f"Worker {pid} has not confirmed exit")
+                await worker.retire_queues(self._settings.parallel_workers_timeout)
+                self._closing_workers.pop(id(worker), None)
+            except (Exception, asyncio.CancelledError) as error:
+                cleanup_errors.append(error)
+                continue
 
             results = await asyncio.gather(
-                *[callback(worker) for callback in self._on_worker_stop],
+                *[
+                    asyncio.wait_for(
+                        callback(worker), self._settings.parallel_workers_timeout
+                    )
+                    for callback in self._on_worker_stop
+                ],
                 return_exceptions=True,
             )
-            failures = [r for r in results if isinstance(r, Exception)]
-            if failures:
-                logger.error(
-                    f"{len(failures)} worker stop hook(s) failed "
-                    f"for worker with PID {pid} on {self.name}",
-                )
-                cleanup_errors.extend(failures)
-
+            cleanup_errors.extend(r for r in results if isinstance(r, BaseException))
         if cleanup_errors:
             raise cleanup_errors[0]

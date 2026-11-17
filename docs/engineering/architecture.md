@@ -302,6 +302,9 @@ sequenceDiagram
 
 ## Model Lifecycle
 
+For the detailed ownership, publication, recovery, and shutdown contract, see
+[Model lifecycle: theory of operation](model-lifecycle.md).
+
 The load, reload, and unload sequence managed by the registry, including
 hook execution order.
 

@@ -3,7 +3,7 @@ import pytest
 import asyncio
 import numpy as np
 from copy import deepcopy
-from types import SimpleNamespace
+from unittest.mock import Mock
 
 from mlserver.errors import MLServerError
 from mlserver.model import MLModel
@@ -11,6 +11,7 @@ from mlserver.settings import Settings, ModelSettings
 from mlserver.types import InferenceRequest
 from mlserver.codecs import NumpyCodec, StringCodec
 from mlserver.parallel.pool import InferencePool, WorkerRegistry
+from mlserver.parallel.worker import Worker
 from mlserver.parallel.errors import InferencePoolUnavailable
 
 from ..fixtures import ErrorModel, SumModel
@@ -33,6 +34,26 @@ def check_pid(pid):
 async def _wait_for_workers(pool: InferencePool, expected: int):
     while len(pool._workers) < expected:
         await asyncio.sleep(0.1)
+
+
+@pytest.fixture
+def startup_worker(mocker):
+    # These unit tests control replay without spawning a process. Represent a
+    # live child accurately: exit status zero means confirmed exit, not liveness.
+    worker = Mock(spec=Worker, pid=987654, exitcode=None, queues_retired=False)
+
+    async def stop():
+        worker.exitcode = 0
+
+    async def retire(_timeout):
+        worker.queues_retired = True
+
+    worker.stop = stop
+    worker.join = lambda _timeout: None
+    worker.kill = mocker.Mock(side_effect=lambda: worker.record_exit(-9))
+    worker.record_exit = lambda code: setattr(worker, "exitcode", code)
+    worker.retire_queues = retire
+    return worker
 
 
 def test_workers_start(inference_pool: InferencePool, settings: Settings):
@@ -158,8 +179,16 @@ async def test_close_is_terminal(inference_pool: InferencePool, sum_model: MLMod
 
 
 async def test_close_clears_tracking_when_worker_cleanup_fails(
-    inference_pool: InferencePool, sum_model: MLModel, mocker
+    settings: Settings, sum_model: MLModel, mocker
 ):
+    # Purpose: Exercise an error raised after real worker cleanup has already finished.
+    # Expect: Terminal close clears replay/replacement state while preserving its
+    # recorded error for repeated callers.
+    # Method: Populate both inventories, wrap successful native cleanup to raise
+    # afterward and check empty model tracking, retired workers and the second close
+    # result.
+    inference_pool = InferencePool(settings)
+    await inference_pool.start()
     inference_pool._worker_registry.add(sum_model.settings)
     inference_pool._pending_reload[inference_pool._model_key(sum_model.settings)] = (
         sum_model
@@ -177,6 +206,9 @@ async def test_close_clears_tracking_when_worker_cleanup_fails(
 
     assert inference_pool.empty()
     assert not inference_pool._pending_reload
+    with pytest.raises(RuntimeError, match="worker cleanup failed"):
+        await inference_pool.close()
+    assert not inference_pool._closing_workers
 
 
 def test_worker_registry_keeps_model_name_and_version_keys_distinct(
@@ -283,19 +315,12 @@ async def test_load_error(
 
 
 async def test_start_worker_waits_for_load_lock(
-    inference_pool: InferencePool, sum_model: MLModel, mocker
+    inference_pool: InferencePool, sum_model: MLModel, mocker, startup_worker
 ):
     dispatch_started = asyncio.Event()
     release_dispatch = asyncio.Event()
     startup_started = asyncio.Event()
-    worker = SimpleNamespace(pid=987654)
-
-    async def stop_worker():
-        return None
-
-    worker.stop = stop_worker
-    worker.join = lambda _timeout: None
-    worker.exitcode = 0
+    worker = startup_worker
 
     async def controlled_dispatch(_message):
         dispatch_started.set()
@@ -432,28 +457,23 @@ async def test_load_and_close_serialize(
     await asyncio.sleep(0)
 
     assert not close_task.done()
-    assert not inference_pool._closing
+    assert inference_pool._closing
 
     release_dispatch.set()
-    await asyncio.gather(load_task, close_task)
+    results = await asyncio.gather(load_task, close_task, return_exceptions=True)
+    assert isinstance(results[0], InferencePoolUnavailable)
+    assert results[1] is None
 
     assert inference_pool._closing
     assert inference_pool.empty()
 
 
 async def test_start_worker_cancellation_settles_startup(
-    inference_pool: InferencePool, mocker
+    inference_pool: InferencePool, mocker, startup_worker
 ):
-    worker = SimpleNamespace(pid=987654)
+    worker = startup_worker
     replay_started = asyncio.Event()
     release_replay = asyncio.Event()
-
-    async def stop_worker():
-        return None
-
-    worker.stop = stop_worker
-    worker.join = lambda _timeout: None
-    worker.exitcode = 0
 
     async def controlled_replay(_worker):
         replay_started.set()
@@ -475,17 +495,9 @@ async def test_start_worker_cancellation_settles_startup(
 
 
 async def test_start_worker_replay_failure_kills_replacement(
-    inference_pool: InferencePool, mocker
+    inference_pool: InferencePool, mocker, startup_worker
 ):
-    worker = SimpleNamespace(pid=987654)
-    worker.kill = mocker.Mock()
-    worker.exitcode = 0
-
-    async def stop_worker():
-        return None
-
-    worker.stop = stop_worker
-    worker.join = lambda _timeout: None
+    worker = startup_worker
 
     async def replay_worker(_worker):
         raise RuntimeError("replay failed")
@@ -604,7 +616,7 @@ async def test_failed_reload_preserves_committed_model_for_rollback(
     dispatch = mocker.patch.object(
         inference_pool._dispatcher,
         "dispatch_update",
-        side_effect=RuntimeError("replacement load failed"),
+        side_effect=[RuntimeError("replacement load failed"), []],
     )
 
     with pytest.raises(RuntimeError, match="replacement load failed"):
@@ -612,7 +624,7 @@ async def test_failed_reload_preserves_committed_model_for_rollback(
 
     model_key = inference_pool._model_key(replacement.settings)
     assert inference_pool.has_model(sum_model.settings)
-    assert inference_pool._pending_reload[model_key] is replacement
+    assert model_key not in inference_pool._pending_reload
 
     dispatch.side_effect = None
     dispatch.return_value = []

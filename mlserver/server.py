@@ -135,12 +135,14 @@ class MLServer:
                 "invalid trusted runtimes allowlist configuration"
             ) from exc
 
-        servers = [self._rest_server.start(), self._grpc_server.start()]
-        if self._metrics_server:
-            servers.append(self._metrics_server.start())
-
         # Start servers and load startup models concurrently
         try:
+            if self._inference_pool_registry:
+                await self._inference_pool_registry.start()
+            servers = [self._rest_server.start(), self._grpc_server.start()]
+            if self._metrics_server:
+                servers.append(self._metrics_server.start())
+
             for server in servers:
                 self._server_tasks.append(asyncio.create_task(server))
             for model_settings in models_settings:

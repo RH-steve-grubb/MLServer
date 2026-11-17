@@ -304,17 +304,34 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
     inference_pool_registry: InferencePoolRegistry,
     pool_id: str | None,
     expected_name: str,
+    sum_model_settings: ModelSettings,
 ):
+    # Purpose: Check registry handling of default/keyed pools whose close reports
+    # failure.
+    # Expect: The pool leaves the active lookup but remains in failed ownership,
+    # blocking same-key loads until confirmed release.
+    # Method: Retire the fixture's real default pool through the registry before
+    # replacing it, so SIGCHLD can still deliver each worker's exit status. Check
+    # native exit and queue retirement, then inject a failing double to inspect
+    # active/failed inventories and retry rejection. The double's cleanup failure
+    # itself does not exercise native shutdown.
     class FailingPool:
+        failure = True
         name = expected_name
         _env = object()
 
         async def close(self):
-            raise RuntimeError("pool cleanup failed")
+            if self.failure:
+                raise RuntimeError("pool cleanup failed")
 
     failing_pool = cast(InferencePool, FailingPool())
-    original_default_pool = inference_pool_registry._default_pool
     if pool_id is None:
+        original_default_pool = inference_pool_registry._default_pool
+        assert original_default_pool is not None
+        original_workers = list(original_default_pool._workers.values())
+        await inference_pool_registry._close_pool()
+        assert all(worker.exitcode is not None for worker in original_workers)
+        assert all(worker.queues_retired for worker in original_workers)
         inference_pool_registry._default_pool = failing_pool
     else:
         inference_pool_registry._pools[pool_id] = failing_pool
@@ -323,13 +340,19 @@ async def test_close_pool_removes_pool_after_cleanup_failure(
         with pytest.raises(RuntimeError, match="pool cleanup failed"):
             await inference_pool_registry._close_pool(pool_id)
 
+        assert inference_pool_registry._failed_pools[pool_id] is failing_pool
+        settings = deepcopy(sum_model_settings)
+        assert settings.parameters is not None
+        settings.parameters.inference_pool_gid = pool_id
+        with pytest.raises(InferencePoolUnavailable):
+            await inference_pool_registry.load_model(SumModel(settings))
         if pool_id is None:
             assert inference_pool_registry._default_pool is None
         else:
             assert pool_id not in inference_pool_registry._pools
     finally:
-        if pool_id is None and original_default_pool is not None:
-            await original_default_pool.close()
+        setattr(failing_pool, "failure", False)
+        await inference_pool_registry._close_pool(pool_id)
 
 
 @pytest.mark.parametrize(
@@ -388,6 +411,9 @@ async def test_load_model_serializes_models_sharing_pool(
 
     class FakePool:
         env_hash = None
+
+        async def start(self):
+            pass
 
         async def load_model(self, model: MLModel) -> MLModel:
             nonlocal active, maximum_active
@@ -451,6 +477,9 @@ async def test_load_model_allows_different_pools_concurrently(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             nonlocal active, entered, maximum_active
             entered += 1
@@ -509,6 +538,9 @@ async def test_load_model_serializes_unload_for_same_pool(
 
     class FakePool:
         env_hash = None
+
+        async def start(self):
+            pass
 
         async def load_model(self, model: MLModel) -> MLModel:
             load_started.set()
@@ -578,6 +610,9 @@ async def test_load_model_allows_unload_for_different_pools(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             load_started.set()
             await release_load.wait()
@@ -636,6 +671,9 @@ async def test_load_model_cancellation_settles_and_preserves_pool_state(
     class FakePool:
         env_hash = None
 
+        async def start(self):
+            pass
+
         async def load_model(self, model: MLModel) -> MLModel:
             load_started.set()
             await release_load.wait()
@@ -674,6 +712,9 @@ async def test_unload_model_cancellation_settles_and_clears_pool_state(
 
     class FakePool:
         env_hash = None
+
+        async def start(self):
+            pass
 
         async def unload_model(self, model: MLModel) -> MLModel:
             unload_started.set()
@@ -719,6 +760,7 @@ async def test_load_model_with_hooks(
     """
     # Create registry with a hook that raises
     registry = InferencePoolRegistry(settings, on_worker_load=[_test_load_hook_raises])
+    await registry.start()
 
     try:
         sum_model = SumModel(sum_model_settings)

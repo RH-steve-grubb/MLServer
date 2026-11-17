@@ -38,6 +38,119 @@ def request_message() -> ModelRequestMessage:
     return ModelRequestMessage(model_name="selected", method_name="predict")
 
 
+async def test_failed_socket_retirement_keeps_owner_and_attempts_other_sockets(
+    directory, monkeypatch
+):
+    # Purpose: Exercise native request-socket close failure during worker revocation and
+    # transport close.
+    # Expect: The worker stays revoked, the failed socket/context remain owned, other
+    # sockets close and repeated public close reports the same error.
+    # Method: Register two real sockets, fault one close, attempt an old send and
+    # inspect actual closed flags plus retained socket identity before test-only
+    # teardown.
+    parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
+    parent.start(lambda _: None, lambda _: None)
+    workers = [worker(directory, parent._reply_endpoint) for _ in range(2)]
+    sockets = [transport._socket(parent._context, zmq.PUSH, set()) for _ in workers]
+    parent._requests.update(zip(workers, sockets))
+    cleanup = OSError("socket release did not complete")
+
+    def fail():
+        raise cleanup
+
+    monkeypatch.setattr(sockets[0], "close", fail)
+    try:
+        with pytest.raises(OSError) as observed:
+            parent.forget_worker(workers[0], 0)
+        assert observed.value is cleanup
+        assert parent._requests[workers[0]] is sockets[0]
+        assert not sockets[0].closed
+        from mlserver.parallel.errors import WorkerStop
+
+        with pytest.raises(WorkerStop):
+            await parent.send(workers[0], request_message())
+        with pytest.raises(OSError) as observed:
+            await parent.close()
+        assert observed.value is cleanup
+        assert sockets[1].closed
+        assert not sockets[0].closed and not parent._context.closed
+        assert parent._requests == {workers[0]: sockets[0]}
+        with pytest.raises(OSError) as repeated:
+            await parent.close()
+        assert repeated.value is cleanup
+    finally:
+        monkeypatch.undo()
+        # Also release the affected baseline's socket, which it no longer owns.
+        for sock in sockets:
+            sock.close()
+        if parent._close_task is None:
+            await parent.close()
+        else:
+            # Test-only cleanup after the recorded terminal close failure.
+            await parent._close()
+
+
+async def test_receive_failure_notifies_waiters_despite_socket_cleanup_failure(
+    directory, monkeypatch
+):
+    # Purpose: Combine receive failure with failed close of a socket whose real native
+    # send remains pending.
+    # Expect: Failure notification still settles that send and retains the primary
+    # receive error plus secondary cleanup error and socket owner.
+    # Method: Observe send entry without a connected peer, inject a malformed reply
+    # through a real socket and inspect waiter completion and the callback's error.
+    failures = []
+    parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
+    parent.start(lambda _: None, failures.append)
+    selected = worker(directory, parent._reply_endpoint)
+    sock = transport._socket(parent._context, zmq.PUSH, set())
+    sock.connect(selected._zmq_request_endpoint)
+    parent._requests[selected] = sock
+    peer = transport._socket(parent._context, zmq.PUSH, set())
+    peer.connect(parent._reply_endpoint)
+    cleanup = OSError("request socket cleanup failed")
+
+    def fail():
+        raise cleanup
+
+    entered = asyncio.Event()
+    original_send = sock.send
+
+    def send(*args, **kwargs):
+        result = original_send(*args, **kwargs)
+        entered.set()
+        return result
+
+    monkeypatch.setattr(sock, "close", fail)
+    monkeypatch.setattr(sock, "send", send)
+    sending = asyncio.create_task(parent.send(selected, request_message()))
+    try:
+        # IMMEDIATE keeps this real send pending without a connected peer.
+        # The callback proves entry before the malformed reply fails reception.
+        await asyncio.wait_for(entered.wait(), 5)
+        assert parent._pending_sends[selected]
+        await peer.send(b"invalid pickle")
+        await asyncio.wait_for(
+            asyncio.gather(parent._receiver, return_exceptions=True), 5
+        )
+        assert failures == [parent._failure]
+        assert getattr(parent._failure, "cleanup_error") is cleanup
+        assert parent._requests[selected] is sock and not sock.closed
+        done, _ = await asyncio.wait({sending}, timeout=1)
+        assert sending in done, "socket cleanup failure stranded a pending send"
+        failure = parent._failure
+        assert isinstance(failure, Exception)
+        with pytest.raises(type(failure)):
+            sending.result()
+    finally:
+        sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
+        monkeypatch.undo()
+        peer.close()
+        sock.close()
+        await parent.close()
+
+
 async def stop(task: asyncio.Task) -> None:
     task.cancel()
     await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=2)
@@ -135,7 +248,7 @@ async def test_wire_uses_queues_default_pickle_and_does_not_modify_worker_state(
         wire = await asyncio.wait_for(peer.recv(), timeout=2)
         assert wire == bytes(ForkingPickler.dumps(message))
         assert target.__dict__ == state
-        sock = parent._requests[42]
+        sock = parent._requests[target]
         assert sock.getsockopt(zmq.SNDHWM) == sock.getsockopt(zmq.RCVHWM) == 0
         assert sock.getsockopt(zmq.IMMEDIATE) == 1
         assert sock.getsockopt(zmq.LINGER) == 0
@@ -281,7 +394,7 @@ async def test_transport_failures_release_send_waiting_for_worker_connection(
         await asyncio.sleep(0.03)
         assert not sending.done()
         if failure == "worker-stop":
-            parent.forget_worker(42)
+            parent.forget_worker(target)
         elif failure == "receiver-failure":
             peer.connect(endpoint)
             await peer.send(ForkingPickler.dumps("invalid response"))
@@ -371,11 +484,11 @@ async def test_worker_replacement_forgets_socket_and_reconnects(
             tasks.append(asyncio.create_task(transport.serve_requests(target)))
             await asyncio.wait_for(parent.send(target, request_message()), timeout=2)
             await asyncio.wait_for(received.get(), timeout=2)
-            sock = parent._requests[42]
+            sock = parent._requests[target]
             assert sock is not previous
-            parent.forget_worker(42)
-            assert sock.closed and 42 not in parent._requests
-            parent.forget_worker(42)
+            parent.forget_worker(target)
+            assert sock.closed and target not in parent._requests
+            parent.forget_worker(target)
             previous = sock
     finally:
         await parent.close()
@@ -386,6 +499,12 @@ async def test_worker_replacement_forgets_socket_and_reconnects(
 async def test_parent_constructor_delays_receiver_and_close_releases_descriptors(
     directory: Path,
 ) -> None:
+    # Purpose: Check lightweight transport construction, explicit activation and
+    # terminal repeated close.
+    # Expect: Construction starts no receiver; repeated start shares it, close releases
+    # native descriptors and a closed transport cannot restart.
+    # Method: Repeat real context/socket activation and closure, compare live descriptor
+    # counts and inspect receiver identity and actual closed flags.
     before = len(list(Path("/proc/self/fd").iterdir()))
     for _ in range(4):
         parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
@@ -398,46 +517,140 @@ async def test_parent_constructor_delays_receiver_and_close_releases_descriptors
         assert parent._receiver is receiver
         await parent.close()
         await parent.close()
+        assert parent._context is not None
         assert parent._context.closed and parent._replies.closed
         with pytest.raises(RuntimeError, match="unavailable"):
             parent.start(Mock(), Mock())
     assert len(list(Path("/proc/self/fd").iterdir())) <= before
 
 
-def test_parent_bind_failure_closes_sockets_and_context(directory: Path) -> None:
+async def test_parent_bind_failure_closes_sockets_and_context(directory: Path) -> None:
+    # Purpose: Exercise reply bind failure after native context/socket allocation.
+    # Expect: The transport's retained owner must close partial setup without leaving
+    # native descriptors.
+    # Method: Bind under a missing IPC directory, close in finally and compare
+    # descriptor counts before and after the real failure.
     before = len(list(Path("/proc/self/fd").iterdir()))
-    with pytest.raises(zmq.ZMQError):
-        transport.ParentTransport(f"ipc://{directory / 'missing' / 'reply.sock'}")
+    parent = transport.ParentTransport(f"ipc://{directory / 'missing' / 'reply.sock'}")
+    try:
+        with pytest.raises(zmq.ZMQError):
+            parent.start(Mock(), Mock())
+    finally:
+        await parent.close()
     assert len(list(Path("/proc/self/fd").iterdir())) <= before
 
 
-def test_parent_socket_creation_failure_releases_context() -> None:
+async def test_parent_socket_creation_failure_releases_context() -> None:
+    # Purpose: Exercise parent setup failing before a socket helper returns a handle.
+    # Expect: The already retained context still receives its termination call.
+    # Method: Use a context double and failing socket helper, then call public close and
+    # inspect termination; native partial-handle behavior has separate probes.
     context = Mock()
     with patch.object(
         transport.zmq.asyncio, "Context", return_value=context
     ), patch.object(transport, "_socket", side_effect=RuntimeError("socket failed")):
-        with pytest.raises(RuntimeError, match="socket failed"):
-            transport.ParentTransport("unused")
+        parent = transport.ParentTransport("unused")
+        try:
+            with pytest.raises(RuntimeError, match="socket failed"):
+                parent.start(Mock(), Mock())
+        finally:
+            await parent.close()
     context.term.assert_called_once()
 
 
-async def test_worker_partial_socket_setup_is_cleaned(directory: Path) -> None:
+async def test_parent_close_waiter_cancellation_retains_native_cleanup(directory):
+    # Purpose: Exercise caller cancellation while parent transport close waits for
+    # receiver cleanup.
+    # Expect: A repeated close joins the retained operation and eventually releases the
+    # real reply socket/context.
+    # Method: Replace the receiver with an event-held finally block, cancel only the
+    # first waiter and release it after the second joins.
+    parent = transport.ParentTransport(transport.create_endpoint(directory, "r"))
+    parent.start(Mock(), Mock())
+    parent._receiver.cancel()
+    await asyncio.gather(parent._receiver, return_exceptions=True)
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def receiver():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    parent._receiver = asyncio.create_task(receiver())
+    await entered.wait()
+    first = asyncio.create_task(parent.close())
+    repeated = None
+    try:
+        await asyncio.wait_for(cleaning.wait(), 5)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        repeated = asyncio.create_task(parent.close())
+        await asyncio.sleep(0)
+        assert not repeated.done()
+        release.set()
+        await asyncio.wait_for(repeated, 5)
+        assert parent._context is not None and parent._context.closed
+        assert parent._replies.closed
+    finally:
+        release.set()
+        await asyncio.gather(
+            first, *([repeated] if repeated else []), return_exceptions=True
+        )
+        await parent.close()
+
+
+@pytest.mark.parametrize("term_fails", [False, True])
+async def test_worker_partial_socket_setup_is_cleaned(
+    directory: Path, term_fails
+) -> None:
+    # Purpose: Exercise worker reply-socket setup failure after request-socket
+    # acquisition, including a context-termination error.
+    # Expect: The initiating setup error stays primary, acquired sockets close and
+    # failed context cleanup remains owned with its secondary error.
+    # Method: Use ownership-aware socket/context doubles, fail the second acquisition
+    # and optional term, then inspect close calls, error identity and the worker
+    # resource owner.
     context, requests = Mock(), Mock()
+    primary = RuntimeError("socket failed")
+    cleanup = RuntimeError("context retirement failed")
+    target = worker(directory, "unused")
+    if term_fails:
+        context.term.side_effect = cleanup
+
+    def socket(context, kind, owned):
+        if kind == zmq.PULL:
+            owned.add(requests)
+            return requests
+        raise primary
+
     with patch.object(
         transport.zmq.asyncio, "Context", return_value=context
-    ), patch.object(
-        transport, "_socket", side_effect=[requests, RuntimeError("socket failed")]
-    ):
-        with pytest.raises(RuntimeError, match="socket failed"):
-            await transport.serve_requests(worker(directory, "unused"))
-    requests.close.assert_called_once()
+    ), patch.object(transport, "_socket", side_effect=socket):
+        with pytest.raises(RuntimeError) as observed:
+            await transport.serve_requests(target)
+    assert observed.value is primary
+    if term_fails:
+        assert getattr(primary, "cleanup_error") is cleanup
+        assert target._zmq_resources[0] is context
+    else:
+        assert target._zmq_resources is None
+    requests.close.assert_called_once_with(linger=0)
     context.term.assert_called_once()
 
 
 def test_socket_option_failure_closes_partial_socket() -> None:
+    # Purpose: Exercise helper rollback when options fail on a returned socket.
+    # Expect: The setup error must propagate after requesting non-lingering socket
+    # close.
+    # Method: Use a socket double whose setsockopt raises and verify close(linger=0);
+    # the subprocess matrix establishes actual native release behavior.
     context, sock = Mock(), Mock()
     context.socket.return_value = sock
     sock.setsockopt.side_effect = RuntimeError("option failed")
     with pytest.raises(RuntimeError, match="option failed"):
-        transport._socket(context, zmq.PUSH)
+        transport._socket(context, zmq.PUSH, set())
     sock.close.assert_called_once_with(linger=0)

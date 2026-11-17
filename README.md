@@ -262,6 +262,7 @@ To see MLServer in action, check out the [full list of examples](./docs/examples
 | Document | Description |
 |----------|-------------|
 | [Architecture](./docs/engineering/architecture.md) | System design with 8 Mermaid diagrams |
+| [Model Lifecycle](./docs/engineering/model-lifecycle.md) | Ownership, publication, recovery, and shutdown flows |
 | [API Reference](./docs/engineering/api.md) | REST and gRPC endpoint reference |
 | [ADRs](./docs/engineering/adr/) | Architecture Decision Records |
 | [Deployment](./docs/engineering/deployment.md) | Container images, Kubernetes, health checks |

@@ -2,6 +2,7 @@ import pytest
 import sys
 import os
 import shutil
+import gc
 
 from mlserver.env import Environment, compute_hash_of_file
 
@@ -91,3 +92,82 @@ def test_activate_env(env: Environment):
 
     assert env._env_path not in ",".join(sys.path)
     assert env._env_path not in os.environ["PATH"]
+
+
+@pytest.mark.parametrize("delete_env", [True, False])
+def test_close_revokes_stale_directory_deletion(tmp_path, delete_env):
+    # Purpose: Exercise owned and borrowed environment release across path reuse.
+    # Expect: An old environment object must never delete a later owner's files.
+    # Method: Close twice, recreate a marker at the same path, then collect the old
+    # object and verify the marker survives.
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned", delete_env=delete_env)
+    env.close()
+    assert path.exists() is not delete_env
+    env.close()
+    path.mkdir(exist_ok=True)
+    (path / "new-owner").touch()
+    del env
+    gc.collect()
+    assert (path / "new-owner").exists()
+
+
+def test_failed_close_retains_directory_owner(tmp_path, monkeypatch):
+    # Purpose: Exercise an environment directory removal that fails once.
+    # Expect: The directory and deletion authority must survive for a successful retry.
+    # Method: Inject rmtree failure, restore it, then close again and check the real
+    # directory disappears.
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned")
+
+    def fail(*args, **kwargs):
+        raise OSError("cannot remove environment yet")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mlserver.env.shutil.rmtree", fail)
+        with pytest.raises(OSError, match="cannot remove"):
+            env.close()
+    assert path.exists()
+    env.close()
+    assert not path.exists()
+
+
+def test_worker_copy_cannot_release_parent_environment(tmp_path):
+    # Purpose: Check that copying an environment into a worker does not transfer
+    # deletion authority.
+    # Expect: A different process must leave the parent's directory intact.
+    # Method: Change the recorded owner PID, attempt close, then restore the real owner
+    # and verify release.
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned")
+    env._owner_pid = os.getpid() + 1
+    env.close()
+    assert path.exists()
+    env._owner_pid = os.getpid()
+    env.close()
+    assert not path.exists()
+
+
+def test_missing_child_during_release_keeps_directory_owned(tmp_path, monkeypatch):
+    # Purpose: Distinguish a missing nested entry from an already released environment
+    # root.
+    # Expect: An incomplete removal must report failure and retain authority to retry.
+    # Method: Make rmtree raise FileNotFoundError while the root exists, then restore it
+    # and verify a second close removes the root.
+    path = tmp_path / "environment"
+    path.mkdir()
+    env = Environment(str(path), "owned")
+
+    def fail(*args, **kwargs):
+        raise FileNotFoundError("a nested entry disappeared")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("mlserver.env.shutil.rmtree", fail)
+        with pytest.raises(FileNotFoundError, match="nested entry"):
+            env.close()
+    assert path.exists()
+    env.close()
+    assert not path.exists()
